@@ -1,4 +1,5 @@
-"""The test case of a harness adapter, for the tests of the packages above common (their tests/test_adapter.py).
+"""The test cases of a harness, for the tests of the packages above common: HarnessCase (their tests/test_adapter.py) and
+SourceCase (tests/test_sessions.py of a harness that gives a session source).
 
 A package fills the values and gets the five checks of an adapter: it gives one entry to the harness table, identify
 names its clients, the table lists it, its setup text is the one expected, and the health count names its calls. The
@@ -10,11 +11,18 @@ test module imports THIS MODULE, not the class, so that unittest discover does n
         KEY, LABEL, LAYER = "codex", "Codex", "codex"
         NAMES = ["codex-mcp-client", "codex"]
         SETUP = "codex mcp add breadcrumbs -- env PYTHONPATH=/x python -m breadcrumbs core mcp"
+
+SourceCase is used the same way (see its docstring).
 """
+import contextlib
+import io
+import json
+import os
 import tempfile
 import unittest
 
-from breadcrumbs import core, ports
+from breadcrumbs import cli, core, ports
+from breadcrumbs.store import Store
 
 
 class HarnessCase(unittest.TestCase):
@@ -49,3 +57,43 @@ class HarnessCase(unittest.TestCase):
                 self.assertEqual(c.call("health")["calls"], {self.KEY: 1, "unknown": 1})
             finally:
                 c.close()
+
+
+class SourceCase(unittest.TestCase):
+    """The test case of a harness that gives a session source (a part's tests/test_sessions.py): the part fills KEY
+    and fixture(), and gets the check of the contract of `ingest`. Its own tests read self.sessions() and self.path.
+
+        class Sessions(harness_case.SourceCase):
+            KEY = "codex"
+            def fixture(self, folder): ...  # write a small file with invented text; return its path
+    """
+    KEY = None  # the key of the harness table
+
+    def fixture(self, folder):
+        raise NotImplementedError
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = os.path.join(tmp.name, "home")
+        self.path = self.fixture(tmp.name)
+
+    def sessions(self):
+        """The sessions that the source of the harness reads from the fixture."""
+        return list(ports.harnesses()[self.KEY]["source"](self.path))
+
+    def ingest(self):
+        """`ingest KEY PATH` into the temporary home: its stats, and the count of blobs in the store."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--home", self.home, "ingest", self.KEY, self.path]), 0)
+        store = Store(os.path.join(self.home, "store"), readonly=True)
+        try:
+            return json.loads(out.getvalue()), len(store)
+        finally:
+            store.close()
+
+    def test_a_second_run_adds_only_the_commit(self):
+        stats, blobs = self.ingest()
+        self.assertGreater(stats["sessions"], 0)
+        self.assertEqual(self.ingest()[1], blobs + 1)
