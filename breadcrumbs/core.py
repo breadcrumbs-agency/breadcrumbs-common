@@ -47,7 +47,7 @@ UNKNOWN = "unknown"
 
 
 def harnesses():
-    """The harness table: {key: {"label", "match", "setup", "order"}}. The adapters give the entries (ports.harness)."""
+    """The harness table: {key: {"label", "match", "setup", "order", "source"}}. The adapters give the entries (ports.harness)."""
     return ports.harnesses()
 
 

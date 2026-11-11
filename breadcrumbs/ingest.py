@@ -3,13 +3,19 @@
 A turn crumb points at one exact text (all its lines). A session crumb holds
 its turns; when a crumb would hold more than `fanout` kids, the kids are
 grouped into "span" crumbs, so every open step in a zoom stays small.
+
+session() and ingest_sessions() are the one loop that reads the sessions of a harness program into a store. A harness
+gives only its source: an iterator of sessions, each (id, title, meta, rows), with rows as put_rows takes them (see
+ports.harness, source).
 """
 
 import json
 import time
 
 from .crumbs import Crumb, get_crumb, put_crumb
+from .history import _ref_name, commit
 from .lines import get_lines, put_text, split_lines
+from .runtime import no_gc
 
 
 def first_line(text):
@@ -254,3 +260,40 @@ def leaves(store, cid, kind=None):
             out.append(node_id)
         stack.extend(reversed(node.kids))
     return out
+
+
+def session(store, index, refs, sid, title, meta, rows, stats):
+    """One session of a harness program: its rows become crumbs (put_rows), the crumbs a "sess" crumb with `meta` and
+    sess=sid, and that crumb the ref "sess-<id>". stats (sessions, messages, bytes) counts the rows. Returns the
+    session crumb, or None when put_rows kept no turn."""
+    rows = list(rows)
+    for row in rows:
+        stats["messages"] += 1
+        stats["bytes"] += len(_text(row.get("content")).encode("utf-8"))
+    turns, _ = put_rows(store, index, rows, sid)
+    if not turns:
+        return None
+    sess = put_tree(store, "sess", title or get_crumb(store, turns[0]).title, turns, meta=dict(meta or {}, sess=sid))
+    refs.set(_ref_name("sess-", sid), sess)
+    stats["sessions"] += 1
+    return sess
+
+
+def ingest_sessions(store, index, refs, sessions, message):
+    """Read `sessions` (an iterator of (id, title, meta, rows), see session()) into the store: one commit on "main"
+    with the session crumbs as roots and `message`, when any session kept a turn. Running it twice adds only a new
+    commit: blobs and index rows dedupe. Returns {sessions, messages, bytes, seconds}."""
+    t0 = time.perf_counter()
+    stats = {"sessions": 0, "messages": 0, "bytes": 0}
+    roots = []
+    with no_gc():  # bulk backfill: skip the cyclic GC scans
+        for sid, title, meta, rows in sessions:
+            sess = session(store, index, refs, sid, title, meta, rows, stats)
+            if sess:
+                roots.append(sess)
+    if roots:
+        commit(store, refs, "main", roots, message)
+    store.flush()
+    index.commit()
+    stats["seconds"] = round(time.perf_counter() - t0, 3)
+    return stats

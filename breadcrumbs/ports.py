@@ -16,7 +16,8 @@ Common holds no list of them. An adapter calls these functions:
     need(name)               the same, but LookupError when no layer gives it
     command(name, add, run)  a layer gives a command of `python -m breadcrumbs`
     commands()               the command line asks for them
-    harness(key, ...)        a harness gives its entry of the harness table (core.py: identify, `core setup`)
+    harness(key, ...)        a harness gives its entry of the harness table (core.py: identify, `core setup`, `ingest`)
+    mcp_add(cli)             the setup function of a program that adds a server by "<cli> mcp add NAME -- COMMAND..."
     harnesses()              core asks for the table
     folders(), pythonpath()  the folders that hold the packages, for a child process that must find the same code
 
@@ -36,13 +37,14 @@ harness wrote. Nothing here names a layer: load() imports what it finds, at the 
 import importlib
 import os
 import pkgutil
+import shlex
 
 PREFIX = "breadcrumbs_"  # the start of the name of the package of a layer above common
 ADAPTER = "adapter"  # the module of that package that gives its part: <package>/adapter.py
 
 _given = {}  # name -> function
 _commands = []  # in the order given
-_harnesses = {}  # key -> {"label", "match", "setup", "order"}
+_harnesses = {}  # key -> {"label", "match", "setup", "order", "source"}
 _layers = {}  # layer -> the folder that holds its package (on PYTHONPATH), in the order announced
 _loaded = False
 
@@ -69,12 +71,21 @@ def command(name, add, run, after=None, before=None, hidden=False):
     _commands.append({"name": name, "add": add, "run": run, "after": after, "before": before, "hidden": hidden})
 
 
-def harness(key, label, match, setup, order):
+def harness(key, label, match, setup, order, source=None):
     """Give a harness to the table of core.py. match: the words of a client's self-name (MCP clientInfo.name, the A2A
     header) that name this harness, in lower case. setup(cmd) -> the text that adds the server command `cmd` (a list)
     to the harness. order: the place in the table. identify asks in this order and `core setup` prints in it, so the
-    table does not depend on which adapter loads first."""
-    _harnesses[key] = {"label": label, "match": tuple(match), "setup": setup, "order": order}
+    table does not depend on which adapter loads first. source(path) -> an iterator of the sessions of the harness
+    program, each (id, title, meta, rows) as breadcrumbs/ingest.py session() takes them (path: where the program keeps
+    them, or None for its own default); `ingest HARNESS [PATH]` reads it into the store. None: the harness has no
+    source."""
+    _harnesses[key] = {"label": label, "match": tuple(match), "setup": setup, "order": order, "source": source}
+
+
+def mcp_add(cli, name="breadcrumbs"):
+    """The setup function of a program whose command is "<cli> mcp add NAME -- COMMAND...": setup(cmd) -> that line for
+    the server command `cmd` (a list)."""
+    return lambda cmd: "%s mcp add %s -- %s" % (cli, name, shlex.join(cmd))
 
 
 def load():
@@ -108,7 +119,7 @@ def commands():
 
 
 def harnesses():
-    """The harness table: {key: {"label", "match", "setup", "order"}}, in the order of the entries."""
+    """The harness table: {key: {"label", "match", "setup", "order", "source"}}, in the order of the entries."""
     load()
     return dict(sorted(_harnesses.items(), key=lambda kv: (kv[1]["order"], kv[0])))
 

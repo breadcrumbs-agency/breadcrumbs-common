@@ -13,6 +13,7 @@
   push NAME [--car FILE]    write the project head as a CAR, add it to IPFS (kubo), print its CID
   pull NAME CID|FILE        fetch a project head from IPFS (or read a CAR file) and join it
   ingest-hermes PROFILE     backfill a profile's state.db (opened read-only)
+  ingest HARNESS [PATH]     read the sessions of a harness program into the store (hermes: its state.db)
   prune-index               drop index rows that older versions made for crumb/crumb_find calls
   install-hermes PROFILE    write the plugin shim into the profile
   sources PROFILE           the codebases in the profile's tool calls: calls, chats, last use (islands)
@@ -160,6 +161,27 @@ def dir_bytes(path):
     return total
 
 
+def ingest_command(args, home):
+    """`ingest HARNESS [PATH]`: the sessions that the source of the harness gives (ports.harness), into the store."""
+    from .ingest import ingest_sessions
+    table = ports.harnesses()
+    if args.harness not in table:
+        print("breadcrumbs: harness is one of %s" % ", ".join(table), file=sys.stderr)
+        return 2
+    source = table[args.harness]["source"]
+    if source is None:
+        print("breadcrumbs: %s has no session source to ingest" % args.harness, file=sys.stderr)
+        return 1
+    store, index, refs, _zoom = open_all(home)
+    try:
+        message = "ingest " + (os.path.basename(args.path) if args.path else args.harness)
+        print(json.dumps(ingest_sessions(store, index, refs, source(args.path), message)))
+    finally:
+        index.close()
+        store.close()
+    return 0
+
+
 def core_command(args, home):
     """`core mcp|sock|a2a|setup`: the servers of core.py. All are read-only. `home` is --home (None: the default only)."""
     from . import core as corelib
@@ -246,6 +268,9 @@ def main(argv=None):
     p = add("push"); p.add_argument("name"); p.add_argument("--car")
     p.add_argument("--no-ipfs", action="store_true", help="write the CAR file only")
     p = add("pull"); p.add_argument("name"); p.add_argument("source", help="a CID or a CAR file")
+    p = add("ingest", help="read the sessions of a harness program into the store")
+    p.add_argument("harness", help="the key of a harness that has a session source (see `core setup`)")
+    p.add_argument("path", nargs="?", default=None, help="where the program keeps its sessions (default: its own place)")
     add("prune-index")
     p = add("supersede", help="tag crumb OLD as superseded by crumb NEW (--undo: retract the tag)")
     p.add_argument("old"); p.add_argument("new"); p.add_argument("--undo", action="store_true")
@@ -293,6 +318,8 @@ def main(argv=None):
         return given[args.cmd]["run"](args, home)
     if args.cmd == "core":
         return core_command(args, args.home)
+    if args.cmd == "ingest":
+        return ingest_command(args, home)
     if args.cmd == "hive":
         return hive_main(args, home)
 
