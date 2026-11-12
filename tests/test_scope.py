@@ -91,6 +91,15 @@ class ScopeTest(unittest.TestCase):
             os.makedirs(os.path.join(outside, ".git"))
             self.assertEqual(scope.nearest(outside, self.home), (scope.GIT, outside))
 
+    def test_a_project_file_or_a_repository_at_the_home_folder_does_not_make_everything_below_it_one_project(self):
+        touch(self.home, "package.json")  # a stray file in the home folder
+        os.makedirs(os.path.join(self.home, ".git"))  # a dotfiles repository
+        downloads = self.p("Downloads")
+        self.assertEqual(scope.nearest(downloads, self.home), (scope.DIR, downloads))
+        self.assertEqual(scope.nearest(self.home, self.home), (scope.DIR, self.home))  # the folder itself, never a source tree
+        r = self.repo("work", "app")
+        self.assertEqual(scope.nearest(os.path.join(r, "src"), self.home), (scope.GIT, r))  # a real repository below still wins
+
     def test_a_breadcrumbs_file_that_says_off_means_no_project_here(self):
         r = self.repo("work", "app")
         quiet = self.p("work", "app", "vendor")
