@@ -16,3 +16,6 @@ breadcrumbs = "breadcrumbs.cli:main"
 
 [tool.setuptools]
 packages = ["breadcrumbs"]
+
+[tool.setuptools.package-data]
+breadcrumbs = ["*.sh"]
