@@ -1,0 +1,30 @@
+name: suite
+# The suite of breadcrumbs-common: the tests in tests/, with this folder on PYTHONPATH (as the README says).
+# Its third-party dependencies come from pyproject.toml. The store homes are empty folders of the runner.
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: dependencies
+        run: |
+          python - > requirements.txt <<'E'
+          import tomllib
+          for d in tomllib.load(open("pyproject.toml", "rb"))["project"].get("dependencies", []):
+              if not d.startswith("breadcrumbs-"):
+                  print(d)
+          E
+          cat requirements.txt
+          python -m pip install -q -r requirements.txt
+      - name: tests
+        env:
+          BREADCRUMBS_HOME: ${{ runner.temp }}/breadcrumbs-home
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: PYTHONPATH=. python -W ignore -m unittest discover -s tests -v
