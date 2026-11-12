@@ -32,6 +32,7 @@ The ports, each a function (the adapter of hermes gives them; the adapter of spa
     hide(home)                 a hide(sid, prefix=False) -> bool: the sessions of that profile that no view shows
     blocked(home)              why no view of that profile opens, or "" when one may
     price(model, provider)     (input, cache read, cache write) in USD per 1M tokens, or None (breadcrumbs/usage.py)
+    ace_join(lines, requests)  [(ace.log line, the main request that it shaped)] (breadcrumbs/usage.py AFTER)
 
 A layer that is not there gives nothing: get() is then None, and the caller answers as it does for a store that no
 harness wrote. Nothing here names a layer: load() imports what it finds, at the first ask.

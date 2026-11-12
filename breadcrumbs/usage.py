@@ -24,6 +24,17 @@ The cache metrics (added to the table of breadcrumbs/metrics.py):
 The price port, ports.get("price"): price(model, provider) -> (input, cache read, cache write) in USD per 1M tokens,
 or None. A harness gives it (the adapter of hermes, from Hermes's own table).
 
+The cache writes beside the ACE acts (AFTER, group "ace"), for each act A of ACTS (pass, keep, fold, ratchet), counted on
+the main requests that the port ace_join (the harness that writes ace.log) joins ace.log lines to. A request counts once,
+for one act: of the lines joined to it, the act of highest rank (RANK: fold > ratchet > keep > pass):
+
+    acts_<A>          sum    the requests whose act is A
+    cw_after_<A>      sum    the cw of the request after an act A
+    breaks_after_<A>  sum    those requests that are cache breaks
+    cw_per_<A>        ratio  cw_after_<A> / acts_<A>
+    break_rate_<A>    ratio  breaks_after_<A> / acts_<A>
+    fold_cw_share     ratio  cw_after_fold / the cw of all main requests (in the same cells)
+
 Where the records go: usage.log in the store home, one line for each request, the folder and the format of the lines that
 the hooks of Hermes write (breadcrumbs_hermes/usage_log.py) and that the viewer reads. line() makes a line; a record that a
 harness gave carries src=<harness> at its end. append() adds the records of an ingest, and skips each one whose request
@@ -138,6 +149,60 @@ def summary(records, price=rates):
     for r, v in pairs:
         by.setdefault(r.get("model") or "-", []).append((r, v))
     out["models"] = {model: _numbers(by[model]) for model in sorted(by)}
+    return out
+
+
+# -- the cache writes beside the ACE acts --------------------------------------------------------------------------------
+# An ACE act (an ace.log line: pass, keep, fold, ratchet) shapes the next main request of its session, and a fold rewrites
+# the context, so that request writes the cache again. The harness that writes ace.log joins each line to that request (the
+# port ace_join); these metrics count what the joined requests wrote. A line that no request follows gives nothing. Two or
+# more lines can join one request (ace.log and usage.log stamp whole seconds); the request then counts once, for the act of
+# highest rank of its lines (RANK), so no cache write and no break counts twice.
+ACTS = ("pass", "keep", "fold", "ratchet")
+RANK = ("fold", "ratchet", "keep", "pass")  # of the lines joined to one request, the first act here is the request's act
+_PER_ACT = ("acts_", "cw_after_", "breaks_after_", "cw_per_", "break_rate_")  # the metrics of each act: <prefix><act>
+_JOINED = "ace.log act=%s, joined to the next main request (usage.log), the act of highest rank of its lines"
+AFTER = metrics.add(*[m for act in ACTS for m in (
+    metrics.metric("acts_" + act, "requests after a %s" % act, "count", "sum", "ace", _JOINED % act, _AT, keyed=True),
+    metrics.metric("cw_after_" + act, "cache write after a %s" % act, "tokens", "sum", "ace",
+                   "usage.log cw of the request after an " + _JOINED % act, _AT, keyed=True),
+    metrics.metric("breaks_after_" + act, "cache breaks after a %s" % act, "count", "sum", "ace",
+                   "cache_breaks of the request after an " + _JOINED % act, _AT, keyed=True),
+    metrics.metric("cw_per_" + act, "cache write per %s" % act, "tokens", "ratio", "ace",
+                   "cw_after_%s / acts_%s" % (act, act), _AT, keyed=True, of=("cw_after_" + act, ("acts_" + act,))),
+    metrics.metric("break_rate_" + act, "cache breaks per %s" % act, "share", "ratio", "ace",
+                   "breaks_after_%s / acts_%s" % (act, act), _AT, keyed=True, of=("breaks_after_" + act, ("acts_" + act,))))],
+    metrics.metric("fold_cw_share", "cache write after a fold (share of all)", "share", "ratio", "ace",
+                   "cw_after_fold / usage.log cw of the main requests", _AT, keyed=True, of=("cw_after_fold", ("cw",))))
+AFTER_KEYS = tuple(m["key"] for m in AFTER)
+_AFTER = {m["key"]: m for m in AFTER}
+
+
+def after(records, joins):
+    """What the requests and the ACE acts give to the metrics of AFTER. records: usage records (the requests of one
+    session, every task); joins: [(act, i)]: an ace.log line of that act, joined to the main request records[i].
+    -> {i: {metric key: value}}, a ratio as its pair: each main request gives its cw to the denominator of fold_cw_share;
+    each joined request gives, for its act (of its lines, the act of highest rank in RANK; a line of another act, as
+    intercept, gives nothing), 1 to acts_<act>, its cw to cw_after_<act>, 1 to breaks_after_<act> when it is a cache break
+    (breaks()), and the parts of the ratios of its act. A request counts once, however many lines join it."""
+    broke, out, won = breaks(records), {}, {}
+
+    def give(i, rec, keys):
+        vals = out.setdefault(i, {})
+        for k in keys:
+            m = _AFTER[k]
+            v = metrics.part(m, rec) if m["agg"] == "ratio" else rec[k]
+            vals[k] = metrics.fold(m["agg"], vals[k], v) if k in vals else v
+
+    for i, r in enumerate(records):
+        if (r.get("task") or "main") == "main":
+            give(i, {"cw_after_fold": 0, "cw": r["cw"]}, ("fold_cw_share",))
+    for act, i in joins:
+        if act in RANK and (i not in won or RANK.index(act) < RANK.index(won[i])):  # an act not in RANK has no metrics
+            won[i] = act
+    for i, act in won.items():
+        rec = {"acts_" + act: 1, "cw_after_" + act: records[i]["cw"], "breaks_after_" + act: int(i in broke), "cw": 0}
+        give(i, rec, [k + act for k in _PER_ACT] + (["fold_cw_share"] if act == "fold" else []))
     return out
 
 
