@@ -27,13 +27,14 @@ class IconTest(unittest.TestCase):
     def test_image_is_a_data_uri_of_the_bytes_of_the_file_beside_the_adapter(self):
         self.put("icon.png", PNG)
         uri = ports.image(self.adapter, "icon.png")
+        assert uri is not None
         head, _, body = uri.partition(",")
         self.assertEqual(head, "data:image/png;base64")
         self.assertEqual(base64.b64decode(body), PNG)
 
     def test_image_knows_svg_and_says_none_for_a_missing_file_an_empty_file_or_a_file_that_is_no_image(self):
         self.put("icon.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>")
-        self.assertTrue(ports.image(self.adapter, "icon.svg").startswith("data:image/svg+xml;base64,"))
+        self.assertTrue((ports.image(self.adapter, "icon.svg") or "").startswith("data:image/svg+xml;base64,"))
         self.put("empty.png", b"")
         self.put("notes.txt", b"hello")
         for name in ("missing.png", "empty.png", "notes.txt"):
@@ -44,7 +45,7 @@ class IconTest(unittest.TestCase):
         ports.harness("iconic", "Iconic", ("iconic",), lambda cmd: "", order=97, icon=ports.image(self.adapter, "icon.png"))
         ports.harness("plain", "Plain", ("plain",), lambda cmd: "", order=98)
         table = ports.harnesses()
-        self.assertTrue(table["iconic"]["icon"].startswith("data:image/png;base64,"))
+        self.assertTrue((table["iconic"]["icon"] or "").startswith("data:image/png;base64,"))
         self.assertIsNone(table["plain"]["icon"])
 
     def test_each_entry_of_the_table_has_the_key_icon(self):
