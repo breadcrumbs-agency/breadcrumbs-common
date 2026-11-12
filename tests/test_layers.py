@@ -1,5 +1,6 @@
 """The layers of breadcrumbs: common (package `breadcrumbs`), then spacegraph (`breadcrumbs_spacegraph`), then the
-harnesses (`breadcrumbs_hermes`, `breadcrumbs_claude`, `breadcrumbs_codex`, `breadcrumbs_opencode`, `breadcrumbs_grok`).
+harnesses (`breadcrumbs_hermes`, `breadcrumbs_claude`, `breadcrumbs_codex`, `breadcrumbs_opencode`, `breadcrumbs_grok`,
+`breadcrumbs_pi`).
 A module must not import a module of a higher layer, at any place in the file (the top, or inside a function), and a
 harness package imports no other harness package. A higher layer gives its part through the port registry
 (breadcrumbs/ports.py), by ONE module: its adapter, <package>/adapter.py. ports.load() imports the adapters by the name
@@ -22,6 +23,7 @@ LAYERS = (  # (layer, folder, package, rank): a module imports its own layer and
     ("codex", "breadcrumbs-codex", "breadcrumbs_codex", 2),
     ("opencode", "breadcrumbs-opencode", "breadcrumbs_opencode", 2),
     ("grok", "breadcrumbs-grok", "breadcrumbs_grok", 2),
+    ("pi", "breadcrumbs-pi", "breadcrumbs_pi", 2),
 )
 ADAPTER = "adapter"
 RANK = {package: rank for _layer, _folder, package, rank in LAYERS}

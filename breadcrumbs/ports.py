@@ -2,7 +2,7 @@
 
 The code has these packages, one for each layer: `breadcrumbs` (common: the store, the reader, the verbs, the servers,
 the command line), `breadcrumbs_spacegraph` (the viewers) and one for each harness (`breadcrumbs_hermes`,
-`breadcrumbs_claude`, `breadcrumbs_codex`, `breadcrumbs_opencode`, `breadcrumbs_grok`). A package imports its own layer
+`breadcrumbs_claude`, `breadcrumbs_codex`, `breadcrumbs_opencode`, `breadcrumbs_grok`, `breadcrumbs_pi`). A package imports its own layer
 and the layers below it, and no layer above it (breadcrumbs-common/tests/test_layers.py). A harness package imports no
 other harness package.
 
