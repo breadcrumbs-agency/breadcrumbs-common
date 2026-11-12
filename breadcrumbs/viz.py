@@ -5,7 +5,7 @@ page opens, and it asks the layers above common for the parts that draw, through
 
     explorer(home, port, harness)  the URL of the explorer of this memory; its server is started, or reused
     term(url)                      the page drawn in this terminal (Kitty, Ghostty); None when the terminal is no such one
-    term_argv(home)                the command line of `term` for this memory (a tmux pane runs it)
+    term_argv(home, harness)      the command line of `term` for this memory (a tmux pane runs it)
 
 In cmux the page opens as a browser split beside the terminal. In Kitty or Ghostty it draws in the terminal (term).
 Anywhere else it opens the default browser. The server is shared: a second `viz` reuses it.
@@ -65,9 +65,10 @@ def can_launch(env=os.environ, platform=sys.platform):
     return platform in ("darwin", "win32") or bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
 
 
-def autostart(home, env=os.environ, err=None):
+def autostart(home, env=os.environ, err=None, harness=None):
     """Hermes starts in a terminal: in cmux or tmux, split a window for the explorer (a cmux browser split, or a
-    tmux pane that runs `term`); in a bare console, ask the OS to open it. Returns "cmux", "tmux", "os" or None."""
+    tmux pane that runs `term`); in a bare console, ask the OS to open it. Returns "cmux", "tmux", "os" or None.
+    harness: the program that starts it (the icon beside the brand)."""
     err = err or sys.stderr
     if env.get("BREADCRUMBS_VIZ", "").lower() in ("0", "off", "no", "false"):
         return None
@@ -75,11 +76,11 @@ def autostart(home, env=os.environ, err=None):
     argv_of = _term_argv()
     if kind == "tmux" and argv_of and shutil.which("tmux"):
         argv = ["tmux", "split-window", "-h", "-d"] + (["-t", env["TMUX_PANE"]] if env.get("TMUX_PANE") else [])
-        r = subprocess.run(argv + [shlex.join(argv_of(home))], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        r = subprocess.run(argv + [shlex.join(argv_of(home, harness))], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if r.returncode == 0:
             return "tmux"
         print("breadcrumbs viz: tmux could not split: %s" % r.stderr.decode("utf-8", "replace").strip(), file=err)
-    url = _explorer()(home, PORT, None)
+    url = _explorer()(home, PORT, harness)
     if kind == "cmux" and shutil.which("cmux"):
         r = subprocess.run(["cmux", "browser", "open", url], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if r.returncode == 0:

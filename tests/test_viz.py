@@ -104,7 +104,7 @@ class Autostart(unittest.TestCase):
             calls.append(argv)
             return mock.Mock(returncode=rc, stderr=b"denied")
 
-        term_argv = lambda home: ["breadcrumbs", "--home", home, "term"]
+        term_argv = lambda home, harness=None: ["breadcrumbs", "--home", home, "term"]
         with mock.patch.object(viz, "_explorer", return_value=explorer), \
                 mock.patch.object(viz, "_term_argv", return_value=term_argv), \
                 mock.patch.object(viz.shutil, "which", which), \
