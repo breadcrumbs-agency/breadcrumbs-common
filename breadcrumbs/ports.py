@@ -37,6 +37,7 @@ The ports, each a function (the adapter of hermes gives them; the adapter of spa
 A layer that is not there gives nothing: get() is then None, and the caller answers as it does for a store that no
 harness wrote. Nothing here names a layer: load() imports what it finds, at the first ask.
 """
+import base64
 import importlib
 import os
 import pkgutil
@@ -74,7 +75,17 @@ def command(name, add, run, after=None, before=None, hidden=False):
     _commands.append({"name": name, "add": add, "run": run, "after": after, "before": before, "hidden": hidden})
 
 
-def harness(key, label, match, setup, order, source=None, usage=None):
+def image(module_file, name):
+    """The data URI of a PNG that sits beside a module (`image(__file__, "icon.png")`): "data:image/png;base64,...", or
+    None when the file is not there. A harness gives it as its icon: the viewers draw it beside the brand."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(module_file)), name), "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return None
+
+
+def harness(key, label, match, setup, order, source=None, usage=None, icon=None):
     """Give a harness to the table of core.py. match: the words of a client's self-name (MCP clientInfo.name, the A2A
     header) that name this harness, in lower case. setup(cmd) -> the text that adds the server command `cmd` (a list)
     to the harness. order: the place in the table. identify asks in this order and `core setup` prints in it, so the
@@ -82,9 +93,10 @@ def harness(key, label, match, setup, order, source=None, usage=None):
     program, each (id, title, meta, rows) as breadcrumbs/ingest.py session() takes them (path: where the program keeps
     them, or None for its own default); `ingest HARNESS [PATH]` reads it into the store. None: the harness has no
     source. usage(path) -> an iterator of the usage records of the model requests in the same place (breadcrumbs/usage.py
-    record()); `ingest` adds them to usage.log of the store home. None: the harness gives no usage."""
+    record()); `ingest` adds them to usage.log of the store home. None: the harness gives no usage. icon: the data URI
+    of its picture (image()), or None: the explorer draws it beside the brand."""
     _harnesses[key] = {"label": label, "match": tuple(match), "setup": setup, "order": order, "source": source,
-                       "usage": usage}
+                       "usage": usage, "icon": icon}
 
 
 def mcp_add(cli, name="breadcrumbs"):

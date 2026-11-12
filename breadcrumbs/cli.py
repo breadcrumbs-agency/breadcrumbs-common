@@ -299,6 +299,8 @@ def main(argv=None):
     p = add("vault", help="the memory as an Obsidian vault (export), a vault as crumbs (import)")
     p.add_argument("action", choices=("export", "import")); p.add_argument("dir")
     p.add_argument("--all", action="store_true", help="export: the private crumbs too")
+    p = add("viz", help="open the explorer here: a cmux split, else Kitty/Ghostty, else the browser (viz.py)")
+    p.add_argument("--port", type=int, default=8765)
     p = add("core", help="the one core of every harness: MCP, A2A or a socket (see breadcrumbs/core.py)")
     p.add_argument("mode", choices=("mcp", "sock", "a2a", "setup"))
     p.add_argument("harness", nargs="?", help="setup: hermes, claude-code, codex or opencode (default: all)")
@@ -348,6 +350,9 @@ def main(argv=None):
         return sync.command(args, home)
     if args.cmd == "hive":
         return hive_main(args, home)
+    if args.cmd == "viz":
+        from . import viz
+        return viz.command(args, home)
 
     if args.cmd == "help":
         ap.print_help()
