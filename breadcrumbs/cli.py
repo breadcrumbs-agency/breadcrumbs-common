@@ -162,7 +162,10 @@ def dir_bytes(path):
 
 
 def ingest_command(args, home):
-    """`ingest HARNESS [PATH]`: the sessions that the source of the harness gives (ports.harness), into the store."""
+    """`ingest HARNESS [PATH]`: the sessions that the source of the harness gives (ports.harness), into the store. When the
+    harness gives the usage of its requests too, they go to usage.log of the store home (breadcrumbs/usage.py append(): a
+    request that is there already is not added again), and the stats get their totals and cache metrics ("usage")."""
+    from . import usage
     from .ingest import ingest_sessions
     table = ports.harnesses()
     if args.harness not in table:
@@ -175,10 +178,15 @@ def ingest_command(args, home):
     store, index, refs, _zoom = open_all(home)
     try:
         message = "ingest " + (os.path.basename(args.path) if args.path else args.harness)
-        print(json.dumps(ingest_sessions(store, index, refs, source(args.path), message)))
+        stats = ingest_sessions(store, index, refs, source(args.path), message)
     finally:
         index.close()
         store.close()
+    read = table[args.harness].get("usage")
+    records = list(read(args.path)) if read is not None else []
+    if records:
+        stats["usage"] = dict(usage.summary(records), added=usage.append(home, records))
+    print(json.dumps(stats))
     return 0
 
 

@@ -21,7 +21,7 @@ import os
 import tempfile
 import unittest
 
-from breadcrumbs import cli, core, ports
+from breadcrumbs import cli, core, ports, usage
 from breadcrumbs.store import Store
 
 
@@ -66,6 +66,9 @@ class SourceCase(unittest.TestCase):
         class Sessions(harness_case.SourceCase):
             KEY = "codex"
             def fixture(self, folder): ...  # write a small file with invented text; return its path
+
+    A harness that gives usage gets one more check: the first run adds a usage.log line for each request of the fixture
+    (src=KEY), and a second run adds none.
     """
     KEY = None  # the key of the harness table
 
@@ -97,3 +100,23 @@ class SourceCase(unittest.TestCase):
         stats, blobs = self.ingest()
         self.assertGreater(stats["sessions"], 0)
         self.assertEqual(self.ingest()[1], blobs + 1)
+
+    def usage_lines(self):
+        """The lines of usage.log in the temporary home."""
+        try:
+            with open(os.path.join(self.home, usage.LOG_NAME), encoding="utf-8") as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_a_second_run_adds_no_usage_record(self):
+        if ports.harnesses()[self.KEY].get("usage") is None:
+            return  # the harness gives no usage
+        first = self.ingest()[0]["usage"]
+        lines = self.usage_lines()
+        self.assertEqual((first["added"], len(lines)), (first["requests"], first["requests"]))
+        self.assertGreater(len(lines), 0, "the fixture has requests")
+        self.assertTrue(all(line.endswith(" src=" + self.KEY) for line in lines))
+        again = self.ingest()[0]["usage"]
+        self.assertEqual((again["added"], again["requests"]), (0, first["requests"]))
+        self.assertEqual(self.usage_lines(), lines, "dedupe by request id")
