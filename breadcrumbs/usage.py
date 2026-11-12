@@ -178,6 +178,11 @@ AFTER_KEYS = tuple(m["key"] for m in AFTER)
 _AFTER = {m["key"]: m for m in AFTER}
 
 
+def rank(act):
+    """The place of an act in RANK (0 is the highest). An act that is not in RANK (intercept) comes after all of them."""
+    return RANK.index(act) if act in RANK else len(RANK)
+
+
 def after(records, joins):
     """What the requests and the ACE acts give to the metrics of AFTER. records: usage records (the requests of one
     session, every task); joins: [(act, i)]: an ace.log line of that act, joined to the main request records[i].
@@ -198,7 +203,7 @@ def after(records, joins):
         if (r.get("task") or "main") == "main":
             give(i, {"cw_after_fold": 0, "cw": r["cw"]}, ("fold_cw_share",))
     for act, i in joins:
-        if act in RANK and (i not in won or RANK.index(act) < RANK.index(won[i])):  # an act not in RANK has no metrics
+        if act in RANK and (i not in won or rank(act) < rank(won[i])):  # an act not in RANK has no metrics
             won[i] = act
     for i, act in won.items():
         rec = {"acts_" + act: 1, "cw_after_" + act: records[i]["cw"], "breaks_after_" + act: int(i in broke), "cw": 0}
