@@ -17,7 +17,8 @@ Common holds no list of them. An adapter calls these functions:
     command(name, add, run)  a layer gives a command of `python -m breadcrumbs`
     commands()               the command line asks for them
     harness(key, ...)        a harness gives its entry of the harness table (core.py: identify, `core setup`, `ingest`,
-                             and the usage of its requests)
+                             the usage of its requests, and its icon: the viewers draw it beside the brand)
+    image(file, name)        the data: URI of an image file that lies beside `file` (an adapter gives its icon by it)
     mcp_add(cli)             the setup function of a program that adds a server by "<cli> mcp add NAME -- COMMAND..."
     harnesses()              core asks for the table
     folders(), pythonpath()  the folders that hold the packages, for a child process that must find the same code
@@ -39,6 +40,7 @@ harness wrote. Nothing here names a layer: load() imports what it finds, at the 
 """
 import base64
 import importlib
+import mimetypes
 import os
 import pkgutil
 import shlex
@@ -48,7 +50,7 @@ ADAPTER = "adapter"  # the module of that package that gives its part: <package>
 
 _given = {}  # name -> function
 _commands = []  # in the order given
-_harnesses = {}  # key -> {"label", "match", "setup", "order", "source", "usage"}
+_harnesses = {}  # key -> {"label", "match", "setup", "order", "source", "usage", "icon"}
 _layers = {}  # layer -> the folder that holds its package (on PYTHONPATH), in the order announced
 _loaded = False
 
@@ -75,16 +77,6 @@ def command(name, add, run, after=None, before=None, hidden=False):
     _commands.append({"name": name, "add": add, "run": run, "after": after, "before": before, "hidden": hidden})
 
 
-def image(module_file, name):
-    """The data URI of a PNG that sits beside a module (`image(__file__, "icon.png")`): "data:image/png;base64,...", or
-    None when the file is not there. A harness gives it as its icon: the viewers draw it beside the brand."""
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(module_file)), name), "rb") as f:
-            return "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
-    except OSError:
-        return None
-
-
 def harness(key, label, match, setup, order, source=None, usage=None, icon=None):
     """Give a harness to the table of core.py. match: the words of a client's self-name (MCP clientInfo.name, the A2A
     header) that name this harness, in lower case. setup(cmd) -> the text that adds the server command `cmd` (a list)
@@ -93,10 +85,26 @@ def harness(key, label, match, setup, order, source=None, usage=None, icon=None)
     program, each (id, title, meta, rows) as breadcrumbs/ingest.py session() takes them (path: where the program keeps
     them, or None for its own default); `ingest HARNESS [PATH]` reads it into the store. None: the harness has no
     source. usage(path) -> an iterator of the usage records of the model requests in the same place (breadcrumbs/usage.py
-    record()); `ingest` adds them to usage.log of the store home. None: the harness gives no usage. icon: the data URI
-    of its picture (image()), or None: the explorer draws it beside the brand."""
+    record()); `ingest` adds them to usage.log of the store home. None: the harness gives no usage. icon: the mark of
+    the program as a data: URI of an image (image(__file__, "icon.png")); the viewers draw it beside the brand, so a
+    viewer says which harness it shows. None: the viewers draw the first letter of the label in its place."""
     _harnesses[key] = {"label": label, "match": tuple(match), "setup": setup, "order": order, "source": source,
                        "usage": usage, "icon": icon}
+
+
+def image(file, name):
+    """The data: URI of the image `name` in the folder of `file` (pass __file__), or None when it is not there or is
+    not an image. An icon is small (a few KB): it travels in the answer of a viewer, so no server of files is needed."""
+    path = os.path.join(os.path.dirname(os.path.abspath(file)), name)
+    kind = mimetypes.guess_type(path)[0] or ""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if not kind.startswith("image/") or not data:
+        return None
+    return "data:%s;base64,%s" % (kind, base64.b64encode(data).decode("ascii"))
 
 
 def mcp_add(cli, name="breadcrumbs"):
@@ -136,7 +144,7 @@ def commands():
 
 
 def harnesses():
-    """The harness table: {key: {"label", "match", "setup", "order", "source", "usage"}}, in the order of the entries."""
+    """The harness table: {key: {"label", "match", "setup", "order", "source", "usage", "icon"}}, in the order of the entries."""
     load()
     return dict(sorted(_harnesses.items(), key=lambda kv: (kv[1]["order"], kv[0])))
 
