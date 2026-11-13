@@ -299,6 +299,10 @@ def main(argv=None):
     p = add("vault", help="the memory as an Obsidian vault (export), a vault as crumbs (import)")
     p.add_argument("action", choices=("export", "import")); p.add_argument("dir")
     p.add_argument("--all", action="store_true", help="export: the private crumbs too")
+    p = add("cost", help="the cost profile of a model (costs.py): show, fetch (the task for an LLM that searches the web), "
+                         "template, set FILE [MODEL], remove")
+    p.add_argument("action", choices=("show", "fetch", "template", "set", "remove")); p.add_argument("items", nargs="*")
+    p.add_argument("--provider", default=None, help="fetch: the provider of the model")
     p = add("viz", help="open the explorer here: a cmux split, else Kitty/Ghostty, else the browser (viz.py)")
     p.add_argument("--port", type=int, default=8765)
     p = add("core", help="the one core of every harness: MCP, A2A or a socket (see breadcrumbs/core.py)")
@@ -353,6 +357,12 @@ def main(argv=None):
     if args.cmd == "viz":
         from . import viz
         return viz.command(args, home)
+    if args.cmd == "cost":
+        from . import costs
+        args.file = args.items[0] if args.action == "set" and args.items else None
+        args.model = args.items[-1] if args.items and args.action == "set" and len(args.items) > 1 else (
+            args.items[0] if args.items and args.action != "set" else None)
+        return costs.command(args, home)
 
     if args.cmd == "help":
         ap.print_help()
