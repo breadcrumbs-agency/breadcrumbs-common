@@ -274,6 +274,9 @@ def main(argv=None):
     p = add("bc"); p.add_argument("ref"); p.add_argument("level", nargs="?", type=float, default=0.25)
     p = add("find"); p.add_argument("query"); p.add_argument("k", nargs="?", type=int, default=8)
     p = add("log"); p.add_argument("ref", nargs="?", default="main")
+    p = add("dials", help="every knob and dial with its value and where the value came from (read-only)")
+    p.add_argument("--model", help="the model whose entries of config.json count")
+    p.add_argument("--markdown", action="store_true", help="the tables of README \"Knobs and dials\"")
     add("stats")
     add("verify")
     p = add("summarize"); p.add_argument("refs", nargs="*"); p.add_argument("--all", action="store_true")
@@ -357,6 +360,10 @@ def main(argv=None):
     if args.cmd == "viz":
         from . import viz
         return viz.command(args, home)
+    if args.cmd == "dials":  # read-only
+        from . import dials
+        print(dials.markdown() if args.markdown else "\n".join(dials.show(home, args.model)))
+        return 0
     if args.cmd == "cost":
         from . import costs
         args.file = args.items[0] if args.action == "set" and args.items else None

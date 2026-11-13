@@ -32,7 +32,7 @@ TIER_FIELDS = set(RATES) | {"upto"}
 SOURCE_FIELDS = {"url", "retrieved", "quote"}
 QUOTE_MAX = 300
 
-# The prompt size at which Anthropic's price for Claude Haiku 5.5 steps up (dials.py PRICE_STEPS reads it).
+# The prompt size at which Anthropic's price for Claude Haiku 5.5 steps up (dials.PRICE_STEPS reads it from BUILTIN).
 HAIKU_STEP = 100_000
 
 BUILTIN = {

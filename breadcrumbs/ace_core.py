@@ -14,7 +14,7 @@ import os
 import re
 import time
 
-from . import tags
+from . import dials, tags
 from .index import STOP
 from .ingest import call_text, plain, step_text
 from .lines import put_text, split_lines
@@ -62,11 +62,9 @@ LOG_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d pid=\d+ sess=(.*) act=\w+ i
                     r"(?: target=(\d{1,9}) gain=(\d\.\d{4})(?: lay=(\d{1,9})"
                     r"(?: gear=(lock|low|-) think=\d{1,12} calls=\d{1,9} work=[01] room=(\d{1,12}))?)?)?")  # a line of Engine._log()
 
-# The dials of a model with their defaults: the names and defaults of breadcrumbs_hermes/dials.py (DIALS). A harness
-# reads the values (dials.value) and gives them to Engine.dial_values; a missing key has its default here.
-DIAL_DEFAULTS = {"ace_tokens": TARGET_TOKENS, "ace_fold_to": FOLD_TO, "ace_fold_cap": FOLD_CAP, "ace_ratchet": RATCHET,
-                 "ace_ceiling": 0, "ace_lockup": False, "ace_room": 0, "ace_downshift": 0.0, "ace_turn_fold": False,
-                 "ace_persist": 0.0, "ace_diverse": 4}
+# The dials of a model with their defaults: the ACE rows of the one table (dials.DIALS). Engine.dial_values reads
+# their values for a model; a missing key has its default here.
+DIAL_DEFAULTS = {d.key: d.default for d in dials.DIALS if d.key.startswith("ace_")}
 
 
 # -- messages ----------------------------------------------------------------------------------------------
@@ -169,7 +167,9 @@ def ref_of(store, text):
 
 
 def _words(text):
-    return {w for w in WORD_RE.findall(text[:4000].lower()) if w not in STOP}
+    """The distinct words of text in the order of first use: the same in every process (a set changes its order with
+    Python's hash seed, and with it the cue words of a layer and so the text of the request)."""
+    return tuple(dict.fromkeys(w for w in WORD_RE.findall(text[:4000].lower()) if w not in STOP))
 
 
 def _anchors(text):
@@ -397,6 +397,7 @@ def turn_worked(turn):
 class Engine:
     """The breadcrumb layer of one chat: the state of ACE and its decisions (see the module doc). A harness subclasses
     it for its session and model callbacks."""
+    threshold_percent = 0.75  # the share of the context window at which a request folds whatever the target is
 
     def __init__(self, target_tokens=None, name="breadcrumbs"):
         env = os.environ.get("BREADCRUMBS_ACE_TOKENS", "")
@@ -456,9 +457,20 @@ class Engine:
         self._apply(self.dial_values(self.root, self.model))
 
     def dial_values(self, root, model):
-        """The dials of model in the folder root, as a dict of DIAL_DEFAULTS' keys. Engine has none: the defaults. A
-        harness overrides it to read its own config (breadcrumbs_hermes.ace reads dials.py)."""
-        return {}
+        """The dials of model in the folder root, read by dials.py: the top level of <root>/config.json, the built-in
+        entries and each entry of "models" whose glob matches the model. A dial that is missing or not valid has its
+        default. The environment is left out: the constructor reads the one variable of ACE."""
+        cfg = dials.config(root)
+        return {key: dials.value(cfg, model, key, {}) for key in DIAL_DEFAULTS}
+
+    def use_model(self, model, context_length):
+        """The model of the chat and its context window in tokens: the dials of that model, and the threshold (the
+        share threshold_percent of the window) that no target passes."""
+        self.model = str(model or "")
+        if self.root:  # a model switch inside a session takes the dials of the new model
+            self._dial()
+        self.context_length = int(context_length or 0)
+        self.threshold_tokens = int(self.context_length * self.threshold_percent)
 
     def _apply(self, values):
         """Set the dials from a dict of their values (valid ones; DIAL_DEFAULTS for a key that is missing). The target
@@ -890,7 +902,7 @@ class Engine:
         for e in seen.values():
             t, text = e.pop("turn"), e.pop("text")
             refs = sum(1 for a in _anchors(text) if last_seen.get(a, -1) > t)
-            overlap = sum(idf[w] for w in e["words"] & focus.keys()) / whole
+            overlap = sum(idf[w] for w in e["words"] if w in idf) / whole
             floor = floors.get(e["id"], 0.0)
             weight = (ROLE_WEIGHT.get(e["role"], 1.0) * 0.5 ** (max(0, b - 1 - t) / HALF) * (1 + 8 * overlap)
                       * (1 + 0.5 * min(4, refs)) * (3 if floor else 1))
@@ -914,7 +926,8 @@ class Engine:
         for g in sorted(groups):
             es = groups[g]
             span = "turns %d-%d" % (es[0]["turn"] + 1, es[-1]["turn"] + 1)
-            cues = " ".join(w for w, _ in collections.Counter(w for e in es for w in e["words"]).most_common(6))
+            counts = collections.Counter(w for e in es for w in e["words"])
+            cues = " ".join(sorted(counts, key=lambda w: (-counts[w], w))[:6])  # a tie goes by the word, not by chance
             if levels[es[0]["id"]] is None:  # the whole group is one crumb: its messages, each under its ref
                 joined = "".join("%s %s %s\n%s\n" % (GAP, e["id"], e["role"], self.zoom.render(e["id"], 1.0)) for e in es)
                 out.append("%s %s group \u00b7%dt | %s | %s\n" % (HANDLE, ref_of(self.store, joined),

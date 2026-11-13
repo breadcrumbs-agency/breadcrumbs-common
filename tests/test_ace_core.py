@@ -51,7 +51,7 @@ class Dials(unittest.TestCase):
         e._apply({})
         self.assertEqual((e.target_tokens, e.fold_to, e.fold_cap, e.step, e.diverse, e.ceiling, e.lockup),
                          (200_000, 0.9, 1.35, 1.45, 4, 0, False))
-        self.assertEqual(e.dial_values("any", "any-model"), {})  # the base engine reads no config
+        self.assertEqual(e.dial_values("no-such-folder", "any-model"), core.DIAL_DEFAULTS)  # no file: the defaults
 
     def test_a_dict_of_values_sets_the_dials(self):
         e = core.Engine()
@@ -233,6 +233,30 @@ class Engine_(unittest.TestCase):
         self.assertEqual(e.ratio, 0.5)
         self.assertEqual(e.base, int(1000 - 0.3 * 2000))
 
+    def test_the_layer_of_a_chat_is_the_same_text_in_every_process(self):
+        """A layer is part of the request, so it must not change with Python's hash seed (a set of words did: the cue
+        words of a group came out in another order in each process)."""
+        code = (
+            "import sys, tempfile, zlib\n"
+            "from breadcrumbs.ace_core import Engine\n"
+            "e = Engine(target_tokens=3000)\n"
+            "e.start_session('s', home=tempfile.mkdtemp())\n"
+            "w = 'kettle walrus shelf harbor lantern orchard quarry meadow thistle anvil'.split()\n"
+            "m = [{'role': 'system', 'content': 'sys'}]\n"
+            "for i in range(30):\n"
+            "    m.append({'role': 'user', 'content': 'ask %d %s %s ' % (i, w[i % 10], w[(i * 3 + 1) % 10]) + 'x ' * 150})\n"
+            "    m.append({'role': 'assistant', 'content': 'say %d %s %s ' % (i, w[(i + 2) % 10], w[(i * 7) % 10]) + 'y ' * 150})\n"
+            "assert e.select_context(m) is not None and e.layer\n"
+            "print(zlib.crc32(e.layer.encode()))\n")
+        seen = set()
+        for seed in ("1", "2", "3", "4"):
+            env = {**os.environ, "PYTHONPATH": COMMON, "PYTHONHASHSEED": seed, "PYTHONDONTWRITEBYTECODE": "1"}
+            env.pop("BREADCRUMBS_ACE_TOKENS", None)
+            out = subprocess.run([sys.executable, "-W", "ignore", "-c", code], cwd=COMMON, env=env, capture_output=True,
+                                 text=True, check=True)
+            seen.add(out.stdout.strip())
+        self.assertEqual(len(seen), 1, seen)
+
 
 class Standalone(unittest.TestCase):
     def test_common_imports_no_harness_or_hermes_module(self):
@@ -245,13 +269,13 @@ class Standalone(unittest.TestCase):
                 names += [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom) and node.level == 0:
                 names.append(node.module or "")
-        bad = [n for n in names if n.split(".")[0] in ("agent", "hermes", "hermes_constants", "dials")
+        bad = [n for n in names if n.split(".")[0] in ("agent", "hermes", "hermes_constants")
                 or n.startswith("breadcrumbs_")]
         self.assertEqual(bad, [])
 
     def test_importing_the_core_loads_no_harness_package(self):
         code = ("import sys; import breadcrumbs.ace_core; "
-                "bad = [m for m in sys.modules if m.startswith(('breadcrumbs_', 'agent', 'hermes', 'dials'))]; "
+                "bad = [m for m in sys.modules if m.startswith(('breadcrumbs_', 'agent', 'hermes'))]; "
                 "print(bad)")
         out = subprocess.run([sys.executable, "-c", code], cwd=COMMON, env={**os.environ, "PYTHONPATH": COMMON},
                              capture_output=True, text=True, check=True)

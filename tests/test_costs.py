@@ -1,11 +1,11 @@
 """costs.py: the cost profiles (built-in Haiku 5.5, costs.json, the price step), the tiers of the price port, the usage
-metrics priced by the prompt of each request, and the update interval of the viewers (tuning.py)."""
+metrics priced by the prompt of each request, and the update interval of the viewers (the dial update_ms, dials.top)."""
 import json
 import os
 import tempfile
 import unittest
 
-from breadcrumbs import costs, tuning, usage
+from breadcrumbs import costs, dials, usage
 
 
 def good(**kw):
@@ -180,22 +180,22 @@ class Tuning(unittest.TestCase):
         self.root = tmp.name
 
     def test_the_default_is_two_seconds(self):
-        self.assertEqual(tuning.update_ms(None, {}), 2000)
-        self.assertEqual(tuning.DEFAULT_MS, 2000)
+        self.assertEqual(dials.top(None, "update_ms", {}), 2000)
+        self.assertEqual(dials.BY_KEY["update_ms"].default, 2000)
 
     def test_the_environment_then_the_file_then_the_default(self):
         with open(os.path.join(self.root, "config.json"), "w") as f:
             json.dump({"update_ms": 750}, f)
-        self.assertEqual(tuning.update_ms(self.root, {}), 750)
-        self.assertEqual(tuning.update_ms(self.root, {"BREADCRUMBS_UPDATE_MS": "300"}), 300)
+        self.assertEqual(dials.top(self.root, "update_ms", {}), 750)
+        self.assertEqual(dials.top(self.root, "update_ms", {"BREADCRUMBS_UPDATE_MS": "300"}), 300)
 
     def test_a_value_out_of_range_or_not_a_whole_number_is_the_default(self):
         for raw in ("10", "99999", "abc", "1.5", "-4"):
-            self.assertEqual(tuning.update_ms(None, {"BREADCRUMBS_UPDATE_MS": raw}), 2000, raw)
+            self.assertEqual(dials.top(None, "update_ms", {"BREADCRUMBS_UPDATE_MS": raw}), 2000, raw)
         with open(os.path.join(self.root, "config.json"), "w") as f:
             json.dump({"update_ms": True}, f)
-        self.assertEqual(tuning.update_ms(self.root, {}), 2000)
-        self.assertEqual(tuning.update_ms(self.root, {"BREADCRUMBS_UPDATE_MS": "250"}), 250)
+        self.assertEqual(dials.top(self.root, "update_ms", {}), 2000)
+        self.assertEqual(dials.top(self.root, "update_ms", {"BREADCRUMBS_UPDATE_MS": "250"}), 250)
 
 
 if __name__ == "__main__":
