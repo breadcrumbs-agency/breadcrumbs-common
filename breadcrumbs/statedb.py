@@ -37,8 +37,14 @@ CREATE TABLE session_model_usage (
 
 def locate(home):
     """The state.db that the viewers read for the store at `home`: the one in the folder above it when there is one (the
-    state.db of a Hermes profile), else the one inside it (from sync), else the path above it (nothing there)."""
+    state.db of a Hermes profile), else the one inside it (from sync), else the path above it (nothing there). The
+    store of a scope has its own state.db when sync gave it one; with none, it reads the state.db of its base."""
+    from .scope import base_of  # a scope's store is under <base>/scopes: the state.db is beside the base
+
     home = os.path.abspath(os.path.expanduser(home))
+    if base_of(home) != home and os.path.isfile(os.path.join(home, NAME)):
+        return os.path.join(home, NAME)  # a scope that sync gave its own state.db
+    home = base_of(home)
     beside, inside = os.path.join(os.path.dirname(home), NAME), os.path.join(home, NAME)
     return beside if os.path.isfile(beside) or not os.path.isfile(inside) else inside
 
