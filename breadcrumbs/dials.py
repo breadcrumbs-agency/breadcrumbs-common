@@ -24,6 +24,7 @@ import fnmatch
 import json
 import os
 from collections import namedtuple
+import tempfile
 
 from . import costs
 
@@ -155,6 +156,140 @@ def config(root):
     except (OSError, ValueError):
         return {}
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _config_for_write(root):
+    """The config object for a mutation, refusing to overwrite malformed JSON."""
+    path = os.path.join(root, "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        cfg = {}
+    except (OSError, ValueError) as error:
+        raise ValueError("cannot edit invalid breadcrumbs config.json") from error
+    if not isinstance(cfg, dict):
+        raise ValueError("cannot edit breadcrumbs config.json: the root must be an object")
+    return cfg
+
+
+def _write_config(root, cfg):
+    """Atomically write config.json, keeping an interrupted edit from leaving half a file."""
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "config.json")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=root, delete=False) as f:
+        staging = f.name
+        json.dump(cfg, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    try:
+        os.replace(staging, path)
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+
+
+def settings(root, model=None, environ=None):
+    """A JSON-ready description of the common dials for the CRUD widget.
+
+    ``model`` is both the model name used for resolution and, when a value is
+    written, the exact key under ``models`` that receives the override.  The
+    viewer normally leaves it empty for profile-wide settings and lets a
+    harness-specific control supply a model glob when needed.
+    """
+    model = str(model or "")
+    cfg = config(root)
+    rows = []
+    for row in resolve(cfg, model or None, environ):
+        d = row.dial
+        layer = cfg.get("models", {}).get(model, {}) if model and isinstance(cfg.get("models"), dict) else {}
+        # update_ms is a top-level viewer dial even when the widget is
+        # inspecting a model; the other dials may have a model-specific layer.
+        overridden = d.key in cfg if d.key == "update_ms" else d.key in (layer if model else cfg)
+        rows.append({"key": d.key, "value": row.value, "default": d.default, "source": row.source,
+                     "overridden": overridden, "kind": d.kind, "min": d.lo, "max": d.hi,
+                     "group": d.group, "env": d.env, "doc": d.doc})
+    patterns = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
+    return {"path": os.path.join(root, "config.json"), "model": model,
+            "models": list(patterns), "groups": [
+                {"name": group, "rows": [r for r in rows if r["group"] == group]}
+                for group in dict.fromkeys(r["group"] for r in rows)
+            ]}
+
+
+def set_setting(root, key, value, model=None):
+    """Create or replace one common dial override and return the new description."""
+    if key not in BY_KEY:
+        raise ValueError("unknown breadcrumbs dial: %s" % key)
+    d = BY_KEY[key]
+    if valid(d, value) is None:
+        raise ValueError("%s must be %s" % (key, _want(d)))
+    model = str(model or "")
+    cfg = _config_for_write(root)
+    if model and key != "update_ms":
+        models = cfg.get("models")
+        if models is None:
+            models = cfg["models"] = {}
+        if not isinstance(models, dict):
+            raise ValueError("cannot edit breadcrumbs config.json: models must be an object")
+        layer = models.setdefault(model, {})
+        if not isinstance(layer, dict):
+            raise ValueError("cannot edit breadcrumbs config.json: model entry must be an object")
+        layer[key] = value
+    else:
+        cfg[key] = value
+    _write_config(root, cfg)
+    return settings(root, model)
+
+
+def delete_setting(root, key, model=None):
+    """Remove one explicit override, allowing resolution to fall back to its default layers."""
+    if key not in BY_KEY:
+        raise ValueError("unknown breadcrumbs dial: %s" % key)
+    model = str(model or "")
+    cfg = _config_for_write(root)
+    models = cfg.get("models")
+    layer = models.get(model, {}) if model and isinstance(models, dict) else cfg
+    if isinstance(layer, dict):
+        layer.pop(key, None)
+        if model and isinstance(models, dict) and not layer:
+            models.pop(model, None)
+    _write_config(root, cfg)
+    return settings(root, model)
+
+
+def reset_settings(root, model=None, all_models=False):
+    """Revert common dial overrides without deleting harness/request settings.
+
+    With a model, only that model layer is reverted.  Without one, profile-wide
+    dial overrides are reverted; ``all_models`` additionally removes dial keys
+    from every model entry while preserving non-dial request options.
+    """
+    model = str(model or "")
+    cfg = _config_for_write(root)
+    if model:
+        models = cfg.get("models")
+        layer = models.get(model, {}) if isinstance(models, dict) else {}
+        if isinstance(layer, dict):
+            for key in BY_KEY:
+                layer.pop(key, None)
+            if isinstance(models, dict) and not layer:
+                models.pop(model, None)
+    else:
+        for key in BY_KEY:
+            cfg.pop(key, None)
+        if all_models and isinstance(cfg.get("models"), dict):
+            for name in list(cfg["models"]):
+                layer = cfg["models"][name]
+                if isinstance(layer, dict):
+                    for key in BY_KEY:
+                        layer.pop(key, None)
+                    if not layer:
+                        cfg["models"].pop(name, None)
+    _write_config(root, cfg)
+    return settings(root, model)
 
 
 def options(cfg, model):
