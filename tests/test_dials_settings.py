@@ -60,6 +60,14 @@ class Settings(unittest.TestCase):
         with open(os.path.join(self.root, "config.json"), encoding="utf-8") as stream:
             self.assertEqual(stream.read(), "not json")
 
+    def test_the_ace_dials_are_grouped_as_thresholds_grow_fold_and_gears(self):
+        names = [g["name"] for g in dials.settings(self.root, environ={})["groups"]]
+        self.assertEqual(names[:4], ["ACE thresholds (per model)", "ACE grow (per model)",
+                                     "ACE fold (per model)", "ACE gears (per model)"])
+        keys = {r["key"]: g["name"] for g in dials.settings(self.root, environ={})["groups"] for r in g["rows"]}
+        self.assertEqual(keys["ace_ratchet"], "ACE grow (per model)")
+        self.assertEqual(keys["ace_fold_to"], "ACE fold (per model)")
+
 
 if __name__ == "__main__":
     unittest.main()

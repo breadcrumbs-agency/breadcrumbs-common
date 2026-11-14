@@ -32,44 +32,44 @@ from . import costs
 Dial = namedtuple("Dial", "key default kind lo hi group env doc")
 
 DIALS = (
-    Dial("ace_tokens", 200_000, "int", 1, None, "ACE (per model)", "BREADCRUMBS_ACE_TOKENS",
+    Dial("ace_tokens", 200_000, "int", 1, None, "ACE thresholds (per model)", "BREADCRUMBS_ACE_TOKENS",
          "The normal size in tokens at which ACE folds a chat. Reading may grow the target above it; work tapers "
          "it back to it."),
-    Dial("ace_fold_to", 0.9, "float", 0.1, 1.0, "ACE (per model)", None,
+    Dial("ace_fold_to", 0.9, "float", 0.1, 1.0, "ACE fold (per model)", None,
          "A fold leaves the request at this share of the target: 0.9 cuts 10%, 20k at a target of 200k. The "
          "same 10% tapers a raised target back to ace_tokens, one step in each interval of work."),
-    Dial("ace_fold_cap", 1.35, "float", 0.1, 2.0, "ACE (per model)", None,
+    Dial("ace_fold_cap", 1.35, "float", 0.1, 2.0, "ACE fold (per model)", None,
          "A fold aims at most at this share of the target, by the estimate (the estimate reads high)."),
-    Dial("ace_ratchet", 1.45, "float", 1.0, 4.0, "ACE (per model)", None,
+    Dial("ace_ratchet", 1.45, "float", 1.0, 4.0, "ACE grow (per model)", None,
          "A fold interval in which the tools only read raises the target by this factor, so that a model that "
          "reads a lot of data keeps it in one place (fewer folds, fewer layers). There is no ceiling but Hermes's "
          "threshold and ace_ceiling. 1.0: never."),
-    Dial("ace_ceiling", 0, "int", 0, None, "ACE (per model)", None,
+    Dial("ace_ceiling", 0, "int", 0, None, "ACE thresholds (per model)", None,
          "The most tokens that ACE lets a request reach: the target, the raised target and the room of lockup stay "
          "at or under it. For a model whose price per token steps up with the size of the prompt: Claude Haiku "
          "5.5 costs 5 times as much over 100,000 prompt tokens, so its built-in entry is 94,000, which keeps the "
          "bill under the step when the estimate reads 5.9% low. 0: no ceiling."),
-    Dial("ace_lockup", False, "bool", None, None, "ACE (per model)", None,
+    Dial("ace_lockup", False, "bool", None, None, "ACE gears (per model)", None,
          "Two gears. Lockup (research and reasoning): from the first request the target is ace_room, and nothing "
          "folds below it. Thinking and calls that only read keep the lockup; the crumb tools never count as work. "
          "Low gear (work): the first call that writes shifts down. Each user turn of work takes ace_downshift of "
          "the room above ace_tokens, and a user turn with no work puts the chat in lockup again. Off: the target "
          "is ace_tokens, and ace_ratchet raises it."),
-    Dial("ace_room", 0, "int", 0, None, "ACE (per model)", None,
+    Dial("ace_room", 0, "int", 0, None, "ACE gears (per model)", None,
          "The research room in lockup, in tokens: the size that a chat may reach before its first gentle fold, "
          "which leaves ace_fold_to of it. A grant, not a cap: it is cut to Hermes's threshold and to ace_ceiling, "
          "and a room under ace_tokens is ace_tokens. 0: Hermes's threshold. Needs ace_lockup."),
-    Dial("ace_downshift", 0.0, "float", 0.0, 1.0, "ACE (per model)", None,
+    Dial("ace_downshift", 0.0, "float", 0.0, 1.0, "ACE gears (per model)", None,
          "The share of the room above ace_tokens that each user turn of work takes off in low gear (with no "
          "ace_lockup: each interval of work). 0: 1 minus ace_fold_to, 10% at the default, as before."),
-    Dial("ace_turn_fold", False, "bool", None, None, "ACE (per model)", None,
+    Dial("ace_turn_fold", False, "bool", None, None, "ACE gears (per model)", None,
          "In low gear the first request of each user turn folds again when the chat has a layer, so the layer "
          "follows the task. The layer then holds inside the turn, and the prompt cache holds. Needs ace_lockup."),
-    Dial("ace_persist", 0.0, "float", 0.0, None, "ACE (per model)", None,
+    Dial("ace_persist", 0.0, "float", 0.0, None, "ACE fold (per model)", None,
          "The words of the tool calls in the kept turns count as focus words at half weight in the layer, and an "
          "old crumb whose rare words come back in later groups of turns gets its weight times 1 plus this "
          "number for each of those groups (at most 4). 0: off."),
-    Dial("ace_diverse", 4, "int", 0, None, "ACE (per model)", None,
+    Dial("ace_diverse", 4, "int", 0, None, "ACE grow (per model)", None,
          "An interval in which the tool calls write, or use this many different tools, is work and not "
          "reading: the raised target tapers back. 0: only a write counts."),
     Dial("prefetch_tokens", 300, "int", 1, None, "Recall", "BREADCRUMBS_PREFETCH_TOKENS",
@@ -191,6 +191,15 @@ def _write_config(root, cfg):
         raise
 
 
+# The order of the ACE groups in the console: where a chat folds (thresholds), what makes the target grow, what a fold
+# leaves, then the gears. Other groups follow in the order of DIALS.
+GROUP_ORDER = ("ACE thresholds (per model)", "ACE grow (per model)", "ACE fold (per model)", "ACE gears (per model)")
+
+
+def _group_rank(group):
+    return GROUP_ORDER.index(group) if group in GROUP_ORDER else len(GROUP_ORDER)
+
+
 def settings(root, model=None, environ=None):
     """A JSON-ready description of the common dials for the CRUD widget.
 
@@ -215,7 +224,7 @@ def settings(root, model=None, environ=None):
     return {"path": os.path.join(root, "config.json"), "model": model,
             "models": list(patterns), "groups": [
                 {"name": group, "rows": [r for r in rows if r["group"] == group]}
-                for group in dict.fromkeys(r["group"] for r in rows)
+                for group in sorted(dict.fromkeys(r["group"] for r in rows), key=_group_rank)
             ]}
 
 
