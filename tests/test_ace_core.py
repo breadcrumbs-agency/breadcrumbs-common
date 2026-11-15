@@ -228,10 +228,17 @@ class Engine_(unittest.TestCase):
         e = core.Engine()
         e.counted(1000, 5, 1005)  # nothing sent yet: no count is read
         self.assertEqual(e.last_prompt_tokens, 1000)
-        e._sent = 2000
+        e._sent = 1000
         e.counted(1000, 5, 1005)
-        self.assertEqual(e.ratio, 0.5)
-        self.assertEqual(e.base, int(1000 - 0.3 * 2000))
+        self.assertEqual(e.ratio, 1.0)
+        self.assertEqual(e.base, int(1000 - core.TPB * 1000))
+
+    def test_the_prior_tokens_per_byte_covers_the_haiku_readings(self):
+        """Before a chat's first count the estimate uses TPB. Haiku's logged readings reach 0.55 tokens per byte
+        (Nov 14 2026); a lower prior sized a fresh chat's first fold 40% over its target (132,101 against 94,000)."""
+        self.assertGreaterEqual(core.TPB, 0.55)
+        e = core.Engine()
+        self.assertEqual(e.tpb, core.TPB)
 
     def test_the_layer_of_a_chat_is_the_same_text_in_every_process(self):
         """A layer is part of the request, so it must not change with Python's hash seed (a set of words did: the cue

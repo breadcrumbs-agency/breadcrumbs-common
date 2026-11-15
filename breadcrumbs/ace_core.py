@@ -30,7 +30,10 @@ TARGET_TOKENS = 200_000
 TAIL_SHARE, LAYER_SHARE, MIN_TAIL = 0.5, 0.4, 2  # the largest shares of a fold: exact tail, layer
 SMALL_TARGET, SMALL_SHARES = 16384, (0.85, 0.15)  # the shares at a target of at most SMALL_TARGET tokens
 FOLD_TO = 0.9                       # a fold makes the request this share of the target (a 10% cut)
-TPB, TPB_RANGE = 0.3, (0.1, 1.0)    # tokens per byte until the model's first count, and its bounds
+# tokens per byte until the model's first count, and its bounds. 0.55 is the highest Haiku reading in the usage logs
+# (Nov 14 2026: 0.44 to 0.55); at the old 0.3 a fresh chat's first fold landed 40% over its target (132,101 tokens
+# against 94,000), because the estimate sizes the fold by bytes before any count is known.
+TPB, TPB_RANGE = 0.55, (0.1, 1.0)
 RATCHET = 1.45                      # a fold interval whose tool calls did no work raises the target (200k -> 290k)
 GAIN_RANGE, FOLD_CAP = (0.5, 1.5), 1.35  # the bounds of a fold's gain; a fold aims at most at FOLD_CAP of the
 #                                          target by the estimate: FOLD_TO 0.9 needs 1.27 at the live gain of 0.709
