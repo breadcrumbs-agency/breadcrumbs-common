@@ -25,14 +25,24 @@ class CacheMetricTest(unittest.TestCase):
 
     def test_the_cache_metrics_are_in_the_common_table(self):
         self.assertEqual(usage.KEYS, ("cache_hit", "cache_write_share", "cache_reuse", "cache_breaks", "break_tokens",
-                                      "cache_saved_usd"))
+                                      "cache_saved_usd", "cache_store_usd", "cache_read_usd", "cache_uncached_usd"))
         for key in usage.KEYS:
             self.assertIs(metrics.get(key), next(m for m in usage.CACHE if m["key"] == key))
         self.assertEqual(metrics.get("cache_hit")["of"], ["cr", ["in", "cr", "cw"]])
         self.assertEqual(metrics.get("cache_write_share")["of"], ["cw", ["in", "cr", "cw"]])
         self.assertEqual(metrics.get("cache_reuse")["of"], ["cr", ["cw"]])
         self.assertEqual({m["key"]: m["agg"] for m in usage.CACHE if m["agg"] != "ratio"},
-                         {"cache_breaks": "sum", "break_tokens": "sum", "cache_saved_usd": "sum"})
+                         {"cache_breaks": "sum", "break_tokens": "sum", "cache_saved_usd": "sum",
+                          "cache_store_usd": "sum", "cache_read_usd": "sum", "cache_uncached_usd": "sum"})
+
+    def test_the_cache_costs_are_the_same_tokens_priced_with_and_without_the_cache(self):
+        # 1M-token rates: input 1.0, cache read 0.1, cache write 1.25 USD. cw=2000 stored, cr=1000 read, in=100 fresh.
+        price = lambda m, p: (1.0, 0.1, 1.25)
+        v = usage.values([req("a", 0, 1000, 2000, inp=100)], price=price)[0]
+        self.assertAlmostEqual(v["cache_store_usd"], 2000 * 1.25 / 1e6)
+        self.assertAlmostEqual(v["cache_read_usd"], 1000 * 0.1 / 1e6)
+        self.assertAlmostEqual(v["cache_uncached_usd"], (1000 + 2000) * 1.0 / 1e6)  # cr and cw at the input rate
+        self.assertNotIn("cache_store_usd", usage.values([req("a", 0, 1000, 2000)], price=None)[0])
 
     def test_a_break_is_a_drop_of_the_cache_read_with_a_write_in_one_session(self):
         rs = [req("a", 10, 0, 500, req_id="1"),       # the first request: no request before it
@@ -200,6 +210,174 @@ class UsageLogTest(unittest.TestCase):
             with open(os.path.join(home, "usage.log")) as f:
                 self.assertEqual(f.read().count("\n"), 1)
 
+
+class LeaseTest(unittest.TestCase):
+    """usage.leases: the cache of a session as leases, rectangles of tokens in time. Each request reads the lease that
+    ends at its cr and writes its cw on top. Prices are made up."""
+    PRICE = staticmethod(lambda model, provider: (3.0, 0.3, 3.75))  # USD per 1M: input, cache read, cache write
+    STEPS = staticmethod(lambda model, provider: [(1000, (1.0, 0.1, 1.25)), (None, (5.0, 0.5, 6.25))])  # steps up over 1000
+
+    def rec(self, ts, cr=0, cw=0, inp=100, task="main", sess="s", dur=None, model="m1"):
+        r = req(sess, ts, cr, cw, inp=inp, model=model, req_id="r%s" % ts, task=task)
+        if dur is not None:
+            r["dur"] = dur
+        return r
+
+    def grow(self, *records, **kw):
+        kw.setdefault("ttl", 300)
+        kw.setdefault("price", self.PRICE)
+        return usage.leases(list(records), **kw)
+
+    def test_a_write_is_a_lease_and_each_read_makes_it_last_the_ttl_more(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=1000), self.rec(100, cr=1000), self.rec(200, cr=1000))
+        self.assertEqual(len(found), 1)
+        ls = found[0]
+        self.assertEqual((ls["lo"], ls["hi"], ls["up"]), (0, 1000, None))
+        self.assertEqual((ls["start"], ls["last"], ls["end"], ls["secs"], ls["why"]), (0, 200, 500, 500, "expired"))
+        self.assertEqual((ls["write_tok"], ls["reads"], ls["read_tok"]), (1000, 2, 2000))
+        self.assertEqual([m["kind"] for m in marks], ["miss", "hit", "hit"])
+        self.assertEqual([(m["read"], m["wrote"]) for m in marks], [(None, ls["id"]), (ls["id"], None), (ls["id"], None)])
+        self.assertEqual(orphan["reads"], 0)
+
+    def test_a_write_on_top_stands_on_the_lease_that_its_request_read(self):
+        found, marks, _ = self.grow(self.rec(0, cw=1000), self.rec(50, cr=1000, cw=200))
+        low, top = found
+        self.assertEqual((low["lo"], low["hi"], top["lo"], top["hi"]), (0, 1000, 1000, 1200))
+        self.assertEqual(top["up"], low["id"])
+        self.assertEqual((low["reads"], top["reads"]), (1, 0))
+        self.assertEqual((low["end"], top["end"]), (350, 350))  # one read reads both from now on: they end together
+        self.assertEqual(marks[1]["kind"], "hit")
+
+    def test_the_size_of_a_hit_is_the_height_of_the_leases_that_it_read(self):
+        found, marks, _ = self.grow(self.rec(0, cw=1000), self.rec(10, cr=1000, cw=5000), self.rec(20, cr=6000, cw=100),
+                                    self.rec(30, cr=6100, cw=50))
+        by = {ls["id"]: ls for ls in found}
+        for m in marks:
+            height, at = 0, m["read"]
+            while at is not None:
+                height += by[at]["hi"] - by[at]["lo"]
+                at = by[at]["up"]
+            self.assertEqual(height, m["cr"])
+        self.assertEqual(by[marks[3]["read"]]["hi"], 6100)
+
+    def test_a_gap_past_the_ttl_ends_the_lease_and_the_read_after_it_has_no_lease(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=1000), self.rec(400, cr=1000))
+        self.assertEqual((found[0]["end"], found[0]["why"], found[0]["reads"]), (300, "expired", 0))
+        self.assertEqual((orphan["reads"], orphan["read_tok"]), (1, 1000))
+        self.assertEqual(marks[1]["read"], None)
+        unseen = found[1]  # the cache that it read is kept from here on: a lease with no write in the log
+        self.assertEqual((unseen["unseen"], unseen["lo"], unseen["hi"], unseen["start"], unseen["write_tok"]), (True, 0, 1000, 400, 0))
+
+    def test_a_request_that_reads_less_writes_beside_what_it_did_not_read(self):
+        # a fold, or a second agent under the same session id: the cache above what it read stays until its own end
+        found, marks, _ = self.grow(self.rec(0, cw=1000), self.rec(10, cr=1000, cw=500), self.rec(20, cr=1000, cw=800))
+        base, old, new = found
+        self.assertEqual([m["kind"] for m in marks], ["miss", "hit", "part"])
+        self.assertEqual((old["lo"], old["hi"], new["lo"], new["hi"]), (1000, 1500, 1000, 1800))
+        self.assertEqual((old["up"], new["up"]), (base["id"], base["id"]))
+        self.assertEqual((base["reads"], base["end"]), (2, 320))
+        self.assertEqual((old["reads"], old["end"]), (0, 310))  # never read: it ends the ttl after its write
+        self.assertEqual(new["end"], 320)
+
+    def test_the_chat_reads_its_own_leases_again_after_the_second_agent(self):
+        found, marks, _ = self.grow(self.rec(0, cw=1000), self.rec(10, cr=1000, cw=5000), self.rec(20, cr=1000, cw=9000),
+                                    self.rec(30, cr=6000, cw=100))
+        self.assertEqual([m["kind"] for m in marks], ["miss", "hit", "part", "hit"])
+        side = found[2]
+        self.assertEqual((side["lo"], side["hi"], side["reads"], side["end"]), (1000, 10000, 0, 320))
+        self.assertEqual(found[1]["reads"], 1)
+
+    def test_a_read_that_ends_inside_a_lease_cuts_it_in_two(self):
+        found, marks, _ = self.grow(self.rec(0, cw=1000), self.rec(10, cr=400, cw=300))
+        low, rest, new = found
+        self.assertEqual([(ls["lo"], ls["hi"]) for ls in found], [(0, 400), (400, 1000), (400, 700)])
+        self.assertEqual((rest["up"], new["up"]), (low["id"], low["id"]))
+        self.assertEqual((low["reads"], low["end"], rest["reads"], rest["end"]), (1, 310, 0, 300))
+        self.assertEqual(marks[1]["kind"], "part")
+        self.assertAlmostEqual(low["store_usd"], 400 * 3.75 / 1e6)  # the money of the one write, shared by the tokens
+        self.assertAlmostEqual(rest["store_usd"], 600 * 3.75 / 1e6)
+        self.assertEqual(sum(ls["write_tok"] for ls in found), 1300)
+
+    def test_the_ttl_is_read_off_the_requests_when_none_is_given(self):
+        short, _, orphan = self.grow(self.rec(0, cw=1000), self.rec(200, cr=1000), self.rec(900, cw=1000), ttl=None)
+        self.assertEqual({ls["ttl"] for ls in short}, {usage.LEASE_TTL})
+        self.assertEqual(short[0]["end"], 500)
+        long, _, orphan = self.grow(self.rec(0, cw=1000), self.rec(900, cr=1000), ttl=None)  # a read bridged 900 s
+        self.assertEqual({ls["ttl"] for ls in long}, {usage.LEASE_TTL_LONG})
+        self.assertEqual((long[0]["end"], orphan["reads"]), (900 + 3600, 0))
+
+    def test_a_read_of_only_the_lowest_part_does_not_say_the_long_ttl(self):
+        # the system prompt can be the same bytes in another chat, which keeps it alive: only a read of all the cache counts
+        found, _, _ = self.grow(self.rec(0, cw=1000), self.rec(10, cr=1000, cw=5000), self.rec(900, cr=1000, cw=5000), ttl=None)
+        self.assertEqual({ls["ttl"] for ls in found}, {usage.LEASE_TTL})
+
+    def test_a_lease_that_still_runs_is_open(self):
+        found, _, _ = self.grow(self.rec(0, cw=1000), now=100)
+        self.assertEqual((found[0]["why"], found[0]["end"]), ("open", 300))
+        self.assertEqual(usage.lease_totals(found, [], {})["open"], 1)
+
+    def test_a_request_begins_its_dur_before_its_stamp(self):
+        found, marks, _ = self.grow(self.rec(100, cw=1000, dur=30.0), self.rec(140, cr=1000, dur=5.0))
+        self.assertEqual((found[0]["start"], found[0]["last"], found[0]["end"]), (70.0, 135.0, 435.0))
+        self.assertEqual([(m["at"], m["ts"]) for m in marks], [(70.0, 100), (135.0, 140)])
+
+    def test_the_money_of_a_lease_at_the_rates(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=1_000_000), self.rec(10, cr=1_000_000))
+        ls = found[0]
+        self.assertAlmostEqual(ls["store_usd"], 3.75)   # cw at the cache write rate
+        self.assertAlmostEqual(ls["read_usd"], 0.3)     # cr at the cache read rate
+        self.assertAlmostEqual(ls["uncached_usd"], 6.0)  # the write and the read at the input rate
+        t = usage.lease_totals(found, marks, orphan)
+        self.assertEqual((t["n"], t["requests"], t["reads"], t["write_tok"], t["read_tok"]), (1, 2, 1, 1_000_000, 1_000_000))
+        self.assertEqual(t["kinds"], {"miss": 1, "hit": 1})
+        self.assertAlmostEqual(t["cache_usd"], 4.05)
+        self.assertAlmostEqual(t["saved_usd"], 1.95)
+        self.assertAlmostEqual(t["ratio"], 0.675)
+
+    def test_a_request_over_a_step_of_the_price_pays_the_higher_rates_for_all_of_it(self):
+        found, marks, _ = self.grow(self.rec(0, cw=900, inp=0), self.rec(10, cr=900, cw=200, inp=0), price=self.STEPS)
+        self.assertEqual([(m["tier"], ls["tier"]) for m, ls in zip(marks, found)], [(0, 0), (1, 1)])
+        self.assertAlmostEqual(found[0]["store_usd"], 900 * 1.25 / 1e6)
+        self.assertAlmostEqual(found[1]["store_usd"], 200 * 6.25 / 1e6)
+        self.assertAlmostEqual(marks[1]["read_usd"], 900 * 0.5 / 1e6)   # its read too: the prompt is 1100
+        self.assertAlmostEqual(found[0]["read_usd"], 900 * 0.5 / 1e6)
+
+    def test_a_write_that_ended_with_no_read_is_in_unread(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=1000), self.rec(10, cr=1000, cw=500), now=10_000)
+        t = usage.lease_totals(found, marks, orphan)
+        self.assertEqual((t["unread"]["n"], t["unread"]["tok"]), (1, 500))
+        self.assertAlmostEqual(t["unread"]["usd"], 500 * 3.75 / 1e6)
+
+    def test_no_price_gives_leases_with_no_money(self):
+        found, _, _ = self.grow(self.rec(0, cw=1000), self.rec(100, cr=1000), price=lambda model, provider: None)
+        self.assertEqual((found[0]["store_usd"], found[0]["read_usd"], found[0]["uncached_usd"]), (0.0, 0.0, 0.0))
+        self.assertEqual((found[0]["write_tok"], found[0]["tier"]), (1000, 0))
+
+    def test_helper_calls_are_left_out(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=1000, task="goal_judge"), self.rec(100, cr=1000, task="goal_judge"))
+        self.assertEqual((found, marks, orphan["reads"]), ([], [], 0))
+
+    def test_sessions_and_models_have_caches_of_their_own(self):
+        found, marks, orphan = self.grow(self.rec(0, cw=500, sess="a"), self.rec(5, cr=500, sess="b"),
+                                         self.rec(6, cr=500, sess="a", model="m2"))
+        self.assertEqual(sorted((ls["sess"], ls["model"], ls["unseen"]) for ls in found),
+                         [("a", "m1", False), ("a", "m2", True), ("b", "m1", True)])
+        self.assertEqual(orphan["reads"], 2)
+        self.assertEqual(len({ls["id"] for ls in found}), 3)
+
+    def test_the_tokens_of_the_leases_are_the_tokens_of_the_log(self):
+        rs = [self.rec(0, cw=1000), self.rec(10, cr=1000, cw=5000), self.rec(20, cr=6000, cw=100), self.rec(30, cr=1000, cw=4000),
+              self.rec(40, cr=5000, cw=10), self.rec(50, cr=300, cw=20), self.rec(900, cr=5010, cw=7), self.rec(910, cr=5017)]
+        found, marks, orphan = self.grow(*rs)
+        self.assertEqual(sum(ls["write_tok"] for ls in found), sum(r["cw"] for r in rs))
+        self.assertEqual(sum(ls["read_tok"] for ls in found) + orphan["read_tok"], sum(r["cr"] for r in rs))
+        self.assertAlmostEqual(sum(ls["store_usd"] for ls in found), sum(r["cw"] for r in rs) * 3.75 / 1e6)
+        by = {ls["id"]: ls for ls in found}
+        for ls in found:  # a lease stands on the top of an earlier lease, which lasts at least as long
+            if ls["up"] is not None:
+                self.assertEqual(by[ls["up"]]["hi"], ls["lo"])
+                self.assertLess(ls["up"], ls["id"])
+                self.assertGreaterEqual(by[ls["up"]]["end"], ls["end"])
 
 if __name__ == "__main__":
     unittest.main()
