@@ -113,6 +113,10 @@ DIALS = (
          "The interval in milliseconds at which the live viewers (the explorer page of /viz) poll the store: the "
          "map, the context and the trail; the measures poll at three times it. Read from the top level of config.json "
          "and from the environment. A value of a 'models' entry is not used here."),
+    Dial("live", True, "bool", None, None, "Viewer", "BREADCRUMBS_LIVE",
+         "Whether the live viewers (the explorer page of /viz) ask the store every update_ms which of its data changed "
+         "(its index, its logs, this chat's config) and reload only that part. Off: the page loads once and reloads by "
+         "hand. Read from the top level of config.json and from the environment, as update_ms is."),
 )
 BY_KEY = {d.key: d for d in DIALS}
 
