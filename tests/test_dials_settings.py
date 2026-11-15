@@ -69,5 +69,51 @@ class Settings(unittest.TestCase):
         self.assertEqual(keys["ace_fold_to"], "ACE fold (per model)")
 
 
+class Chain(unittest.TestCase):
+    """A chat reads a chain of files, the widest first (a profile's, then its scope's)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profile, self.scope = os.path.join(self.tmp.name, "p"), os.path.join(self.tmp.name, "p", "scopes", "s")
+        os.makedirs(self.scope)
+        self.write(self.profile, {"ace_tokens": 300000, "neighbor": 0.2, "models": {"m*": {"ace_fold_to": 0.8}}})
+        self.write(self.scope, {"ace_tokens": 150000, "ace_fold_to": 0.5, "models": {"mod*": {"ace_ratchet": 1.0}}})
+
+    def write(self, folder, cfg):
+        with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+
+    def rows(self, model=None):
+        chain = [("profile", dials.config(self.profile)), ("scope", dials.config(self.scope))]
+        return {r.dial.key: (r.value, r.source) for r in dials.resolve(chain, model, {})}
+
+    def test_the_scope_wins_at_the_top_level_and_the_profile_fills_the_rest(self):
+        rows = self.rows()
+        self.assertEqual(rows["ace_tokens"], (150000, "scope"))
+        self.assertEqual(rows["neighbor"], (0.2, "profile"))
+        self.assertEqual(rows["ace_fold_to"], (0.5, "scope"))
+
+    def test_a_models_entry_of_either_file_beats_a_top_level_and_the_scope_entry_comes_last(self):
+        rows = self.rows("model-x")
+        self.assertEqual(rows["ace_fold_to"], (0.8, 'profile models["m*"]'))
+        self.assertEqual(rows["ace_ratchet"], (1.0, 'scope models["mod*"]'))
+        self.assertEqual(dials.options([("profile", {"models": {"m*": {"top_k": 1, "seed": 1}}}),
+                                        ("scope", {"models": {"m*": {"top_k": 2}}})], "m1"), {"top_k": 2, "seed": 1})
+
+    def test_one_dict_is_one_file_as_before(self):
+        rows = {r.dial.key: r.source for r in dials.resolve(dials.config(self.profile), "model", {})}
+        self.assertEqual(rows["ace_fold_to"], 'models["m*"]')
+        self.assertEqual(rows["ace_tokens"], "config")
+
+    def test_settings_chain_resolves_through_the_chain_and_marks_the_last_files_overrides(self):
+        got = dials.settings_chain([("profile", self.profile), ("scope", self.scope)], environ={})
+        rows = {r["key"]: r for g in got["groups"] for r in g["rows"]}
+        self.assertEqual(got["path"], os.path.join(self.scope, "config.json"))
+        self.assertEqual([c["label"] for c in got["chain"]], ["profile", "scope"])
+        self.assertEqual((rows["neighbor"]["value"], rows["neighbor"]["overridden"]), (0.2, False))
+        self.assertEqual((rows["ace_tokens"]["value"], rows["ace_tokens"]["overridden"]), (150000, True))
+
+
 if __name__ == "__main__":
     unittest.main()

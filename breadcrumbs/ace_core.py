@@ -460,8 +460,13 @@ class Engine:
         """The dials of model in the folder root, read by dials.py: the top level of <root>/config.json, the built-in
         entries and each entry of "models" whose glob matches the model. A dial that is missing or not valid has its
         default. The environment is left out: the constructor reads the one variable of ACE."""
-        cfg = dials.config(root)
+        cfg = self.config_chain(root)
         return {key: dials.value(cfg, model, key, {}) for key in DIAL_DEFAULTS}
+
+    def config_chain(self, root):
+        """What dial_values reads: <root>/config.json (a dict). A harness whose chats also have a file of their scope
+        gives a chain [(label, dict)], the widest first (dials.chain_of; breadcrumbs_hermes.ace)."""
+        return dials.config(root)
 
     def use_model(self, model, context_length):
         """The model of the chat and its context window in tokens: the dials of that model, and the threshold (the
