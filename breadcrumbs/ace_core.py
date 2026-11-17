@@ -647,9 +647,9 @@ class Engine:
         self.gear, self._turn_n = ("lock" if self.lockup else "-"), None
 
     def close(self):
-        for obj in (self.store, self._index):
+        for obj in (self.store, self._index):  # not `obj and`: an empty Store is falsy (__len__) and would stay open
             try:
-                obj and obj.close()
+                obj is not None and obj.close()
             except Exception:
                 pass
         self.store = self.zoom = self._index = None
