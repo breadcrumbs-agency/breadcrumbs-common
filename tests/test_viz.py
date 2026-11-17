@@ -4,6 +4,7 @@ import argparse
 import io
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -344,8 +345,14 @@ class RealTmux(unittest.TestCase):
                 mock.patch.object(viz, "_explorer", side_effect=AssertionError("a split needs no server of ours")):
             where = viz.autostart("/h/breadcrumbs", env=env, err=io.StringIO())
         self.assertEqual(where, "tmux")
-        panes = self.tmux("list-panes", "-t", "t", "-F", "#{pane_id} #{pane_width} #{pane_current_command}").stdout.split("\n")
-        panes = [p.split() for p in panes if p]
+        # a new pane reports its forked tmux as the command until the child has exec'd `sleep` (Linux runners show it):
+        # read the panes until both are `sleep`, for up to 5 s
+        for _ in range(50):
+            panes = self.tmux("list-panes", "-t", "t", "-F", "#{pane_id} #{pane_width} #{pane_current_command}").stdout.split("\n")
+            panes = [p.split() for p in panes if p]
+            if len(panes) == 2 and all(p[2] == "sleep" for p in panes):
+                break
+            time.sleep(0.1)
         self.assertEqual(len(panes), 2, panes)
         self.assertEqual(sorted(p[2] for p in panes), ["sleep", "sleep"])
         self.assertEqual(panes[0][0], pane)  # the chat's pane is the first, and keeps the focus (-d)
