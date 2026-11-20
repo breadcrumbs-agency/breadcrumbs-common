@@ -256,6 +256,74 @@ class Dates(Base):
         self.assertIn("(updated)", out.getvalue())
 
 
+class Export(Base):
+    """A dictionary moves as a document: nothing assigns it a file name."""
+
+    def setUp(self):
+        super().setUp()
+        catalog.add(self.root, "anthropic/claude-haiku-5-5", {"ace_tokens": 90000}, since="2026-11-13")
+        catalog.add(self.root, "ollama/haiku-local", {"top_k": 20})
+        catalog.link(self.root, "ollama/haiku-local", "anthropic/claude-haiku-5-5")
+
+    def other(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
+
+    def test_export_then_import_makes_the_same_dictionary_with_its_dates(self):
+        doc = catalog.export(self.cfg())
+        self.assertEqual((doc["format"], sorted(doc["entries"]), doc["links"]),
+                         ("breadcrumbs-model-dictionary", ["anthropic/claude-haiku-5-5", "ollama/haiku-local"],
+                          [["anthropic/claude-haiku-5-5", "ollama/haiku-local"]]))
+        there = self.other()
+        self.assertEqual(catalog.import_document(there, json.loads(json.dumps(doc))), sorted(doc["entries"]))
+        self.assertEqual(catalog.export(dials.config(there)), doc)
+        self.assertEqual(catalog.view(dials.config(there), "anthropic/claude-haiku-5-5")["date"], "2026-11-13")
+
+    def test_import_refuses_an_id_that_is_there_unless_forced_and_writes_nothing_on_a_bad_document(self):
+        doc = catalog.export(self.cfg())
+        with self.assertRaises(ValueError):
+            catalog.import_document(self.root, doc)
+        doc["entries"]["anthropic/claude-haiku-5-5"]["settings"]["ace_tokens"] = 80000
+        catalog.import_document(self.root, doc, force=True)
+        self.assertEqual(catalog.view(self.cfg(), "anthropic/claude-haiku-5-5")["settings"], {"ace_tokens": 80000})
+        there = self.other()
+        for bad in ({}, {"format": "x"}, {"format": catalog.FORMAT, "entries": {"nope": {}}},
+                    {"format": catalog.FORMAT, "entries": {"a/b": {"settings": {"ace_tokens": -1}}}},
+                    {"format": catalog.FORMAT, "entries": {"a/b": {"since": "soon"}}},
+                    {"format": catalog.FORMAT, "entries": {"a/b": {}}, "links": [["a/b", "c/d"]]}):
+            with self.assertRaises(ValueError):
+                catalog.import_document(there, bad)
+        self.assertFalse(os.path.exists(os.path.join(there, "config.json")))
+
+    def test_the_command_prints_the_document_and_writes_a_file_only_where_one_is_named(self):
+        def run(action, *items, **kw):
+            args = types.SimpleNamespace(action=action, items=list(items), note=None, link=False,
+                                         force=kw.get("force", False), since=None)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = catalog.command(args, kw.get("home", self.root))
+            return code, out.getvalue()
+        code, text = run("export")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(text)["format"], catalog.FORMAT)
+        self.assertEqual(sorted(os.listdir(self.root)), ["config.json"])      # printing made no file
+        named = os.path.join(self.other(), "mine.json")
+        self.assertEqual(run("export", named)[0], 0)
+        there = self.other()
+        code, out = run("import", named, home=there)
+        self.assertEqual(code, 0)
+        self.assertIn("imported 2 entries", out)
+        self.assertEqual(catalog.export(dials.config(there)), json.loads(text))
+
+    def test_the_widget_exports_without_a_file_and_imports_a_document(self):
+        got = catalog.apply(self.root, "export")
+        self.assertEqual(got["export"]["format"], catalog.FORMAT)
+        there = self.other()
+        got = catalog.apply(there, "import", {"document": got["export"]})
+        self.assertEqual(len(got["entries"]), 2)
+
+
 class Clone(Base):
     def setUp(self):
         super().setUp()

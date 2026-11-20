@@ -40,6 +40,7 @@ Mutations take the folder of the file (like dials.set_setting) and return the en
 """
 import copy
 import fnmatch
+import json
 import os
 import re
 import time
@@ -579,6 +580,75 @@ def relate(root, a, b):
 
 # --- the command line and the widget ----------------------------------------------------------------------------
 
+FORMAT = "breadcrumbs-model-dictionary"
+
+
+def export(cfg):
+    """The dictionary as one document that stands alone: no file name is part of it. What is shown, copied or
+    written is the caller's choice (`models export` prints it; `models export FILE` writes the file you name). Only
+    the valid parts go out; the dates (since, updated) go with each entry, so the masters survive the move."""
+    entries, links, unlinked = section(cfg)
+    good = {i: copy.deepcopy(e) for i, e in sorted(entries.items()) if _ok_id(i) and isinstance(e, dict)}
+    for entry in good.values():
+        try:
+            check_settings(_settings(entry))
+        except ValueError:
+            entry["settings"] = {}
+    pairs = lambda ps: sorted(sorted(p) for p in ps if all(i in good for i in p))  # noqa: E731
+    doc = {"format": FORMAT, "version": 1, "entries": good}
+    if links:
+        doc["links"] = pairs(links)
+    if unlinked:
+        doc["unlinked"] = pairs(unlinked)
+    return doc
+
+
+def check_document(doc):
+    """The document that export() makes, or a ValueError that names the first thing wrong. Nothing is changed."""
+    if not isinstance(doc, dict) or doc.get("format") != FORMAT:
+        raise ValueError("not a model dictionary (its format is %r)" % FORMAT)
+    entries = doc.get("entries")
+    if not isinstance(entries, dict):
+        raise ValueError("entries must be an object")
+    for ident, entry in entries.items():
+        if not _ok_id(ident):
+            raise ValueError("%r: not VENDOR/MODEL" % ident)
+        if not isinstance(entry, dict):
+            raise ValueError("%s: not an object" % ident)
+        try:
+            check_settings(_settings(entry))
+            check_date(entry.get("since"))
+        except ValueError as e:
+            raise ValueError("%s: %s" % (ident, e))
+    for name in ("links", "unlinked"):
+        for pair in doc.get(name) or []:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2 and all(i in entries for i in pair)):
+                raise ValueError("%s %r: both ids need an entry of the document" % (name, pair))
+    return doc
+
+
+def import_document(root, doc, force=False):
+    """Add the entries of an exported document to the dictionary of root, with their dates. An id that exists is
+    refused (nothing is written) unless force, which replaces it. Links and vetoes of the document are added.
+    Returns the ids that were written."""
+    check_document(doc)
+
+    def change(cfg, raw):
+        clash = sorted(i for i in doc["entries"] if i in raw["entries"])
+        if clash and not force:
+            raise ValueError("already here: %s (force replaces them)" % ", ".join(clash))
+        for ident, entry in doc["entries"].items():
+            entry = copy.deepcopy(entry)
+            entry.setdefault("settings", {})
+            entry.setdefault("updated", now())
+            raw["entries"][ident] = entry
+        raw["links"].extend(list(p) for p in doc.get("links") or [])
+        raw["unlinked"].extend(list(p) for p in doc.get("unlinked") or [])
+
+    _edit(root, change)
+    return sorted(doc["entries"])
+
+
 def _value(text):
     """A value from the command line: JSON when it parses (0.7, true, null, "x", [1]), else the text."""
     import json
@@ -612,7 +682,7 @@ def lines(v):
 
 
 def command(args, home):
-    """`python -m breadcrumbs models list|show|add|set|unset|note|since|rm|clone|link|unlink|relate|suggest|seen`."""
+    """`python -m breadcrumbs models list|show|add|set|unset|note|since|rm|clone|link|unlink|relate|suggest|seen|export|import`."""
     import sys
 
     from . import dials
@@ -643,6 +713,27 @@ def command(args, home):
                       ", ".join("%s (%s)" % (i["id"], i["how"]) for i in s["inherits"]) or "nothing"))
             if not got:
                 print("every model that ran here has an entry")
+            return 0
+        if act == "export":  # a document on stdout; a file only where one is named
+            text = json.dumps(export(cfg), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            if items and items[0] != "-":
+                with open(items[0], "w", encoding="utf-8") as f:
+                    f.write(text)
+                print("wrote %s (%d entries)" % (items[0], len(export(cfg)["entries"])))
+            else:
+                sys.stdout.write(text)
+            return 0
+        if act == "import":
+            if not items:
+                print("models import needs FILE or - (stdin)", file=sys.stderr)
+                return 2
+            try:
+                text = sys.stdin.read() if items[0] == "-" else open(items[0], encoding="utf-8").read()
+                doc = json.loads(text)
+            except (OSError, ValueError) as e:
+                raise ValueError("cannot read %s: %s" % (items[0], e))
+            got = import_document(home, doc, force=getattr(args, "force", False))
+            print("imported %d entries: %s" % (len(got), ", ".join(got)))
             return 0
         if not items:
             print("models %s needs an id (VENDOR/MODEL)" % act, file=sys.stderr)
@@ -693,7 +784,7 @@ def command(args, home):
 
 def apply(root, action, payload=None):
     """The widget's call: one action on the folder's file. Returns {"entries": rows, "suggest": [...]} after it.
-    Actions: get, add, set, unset, note, since, rm, clone, link, unlink, relate."""
+    Actions: get, export, import, add, set, unset, note, since, rm, clone, link, unlink, relate."""
     from . import dials
 
     p = dict(payload or {})
@@ -718,7 +809,12 @@ def apply(root, action, payload=None):
         unlink(root, ident, p.get("other"))
     elif action == "relate":
         relate(root, ident, p.get("other"))
-    elif action != "get":
+    elif action == "import":
+        import_document(root, p.get("document"), bool(p.get("force")))
+    elif action not in ("get", "export"):
         raise ValueError("unknown catalog action: %s" % action)
     cfg = dials.config(root)
-    return {"entries": rows(cfg), "suggest": suggest(cfg, seen(root)), "unlisted": unlisted(cfg, seen(root))}
+    out = {"entries": rows(cfg), "suggest": suggest(cfg, seen(root)), "unlisted": unlisted(cfg, seen(root))}
+    if action == "export":
+        out["export"] = export(cfg)  # the widget offers it as a download: no file is made here
+    return out

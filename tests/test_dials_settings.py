@@ -114,6 +114,11 @@ class Chain(unittest.TestCase):
         self.assertEqual((rows["neighbor"]["value"], rows["neighbor"]["overridden"]), (0.2, False))
         self.assertEqual((rows["ace_tokens"]["value"], rows["ace_tokens"]["overridden"]), (150000, True))
 
+    def test_a_bool_dial_reads_its_environment_variable(self):
+        for raw, want in (("0", False), ("false", False), ("Off", False), ("1", True), ("yes", True)):
+            self.assertIs(dials.value({}, None, "takeover", {"BREADCRUMBS_TAKEOVER": raw}), want, raw)
+        self.assertIs(dials.value({"takeover": False}, None, "takeover", {"BREADCRUMBS_TAKEOVER": "maybe"}), False)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -307,9 +307,9 @@ def main(argv=None):
     p.add_argument("action", choices=("show", "fetch", "template", "set", "remove")); p.add_argument("items", nargs="*")
     p.add_argument("--provider", default=None, help="fetch: the provider of the model")
     p = add("models", help="the model dictionary (catalog.py): list, show, add, set, unset, note, since, rm, clone, link, unlink, \
-relate, suggest, seen")
+relate, suggest, seen, export, import")
     p.add_argument("action", choices=("list", "show", "add", "set", "unset", "note", "since", "rm", "clone", "link", "unlink",
-                                      "relate", "suggest", "seen"))
+                                      "relate", "suggest", "seen", "export", "import"))
     p.add_argument("items", nargs="*", help="VENDOR/MODEL, then KEY=VALUE (add, set), a key (unset), the other id "
                                             "(clone, link, unlink, relate)")
     p.add_argument("--note", default=None, help="add: a note on the entry")

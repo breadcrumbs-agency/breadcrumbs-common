@@ -122,6 +122,13 @@ DIALS = (
          "Whether the live viewers (the explorer page of /viz) ask the store every update_ms which of its data changed "
          "(its index, its logs, this chat's config) and reload only that part. Off: the page loads once and reloads by "
          "hand. Read from the top level of config.json and from the environment, as update_ms is."),
+    Dial("takeover", True, "bool", None, None, "Plugin", "BREADCRUMBS_TAKEOVER",
+         "Whether the plugin takes over the context of a Hermes profile whose memory provider it is: when it loads and "
+         "context.engine is unset or Hermes's own compressor, it selects itself (ACE folds the context, Hermes's own "
+         "compaction stands down) and turns off the Hermes compaction extras that overlap it (idle compaction, "
+         "proactive pruning, prepared summaries, native Responses compaction). Off: the plugin never changes the "
+         "context settings. `compaction off` sets it false and `compaction on` clears it. Read from the top level of "
+         "config.json and from the environment. A value of a 'models' entry is not used here."),
 )
 BY_KEY = {d.key: d for d in DIALS}
 
@@ -382,7 +389,11 @@ def from_env(d, environ):
     if raw in (None, ""):
         return None, ""
     try:
-        v = valid(d, int(raw) if d.kind == "int" else float(raw))
+        if d.kind == "bool":  # 1/0, true/false, yes/no, on/off
+            word = str(raw).strip().lower()
+            v = True if word in ("1", "true", "yes", "on") else False if word in ("0", "false", "no", "off") else None
+        else:
+            v = valid(d, int(raw) if d.kind == "int" else float(raw))
     except ValueError:
         v = None
     return (v, "") if v is not None else (None, "%s=%r is not %s; ignored" % (d.env, raw, _want(d)))
