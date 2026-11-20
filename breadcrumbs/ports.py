@@ -35,6 +35,8 @@ The ports, each a function (the adapter of hermes gives them; the adapter of spa
     price(model, provider)     (input, cache read, cache write) in USD per 1M tokens, or tiers (costs.pick), or None (breadcrumbs/usage.py)
     ace_join(lines, requests)  [(ace.log line, the main request that it shaped)] (breadcrumbs/usage.py AFTER)
     settings(root, action, payload)  optional harness-specific settings CRUD for the common explorer widget
+    groups(root, action, payload)  the groups of profiles of the harness's root (get, create, rename, delete, add,
+                               remove, note); the answer lists the groups and the profiles in none, or None
     config_layers(root)        the config files that the explorer of the store at root may show and change, each
                                {id, kind, label, path (a folder that holds config.json), parent (the id of the file
                                that it layers on, or None), applies (which chats read it), here (the file of this
