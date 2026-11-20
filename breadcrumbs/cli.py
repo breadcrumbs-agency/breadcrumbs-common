@@ -306,13 +306,14 @@ def main(argv=None):
                          "template, set FILE [MODEL], remove")
     p.add_argument("action", choices=("show", "fetch", "template", "set", "remove")); p.add_argument("items", nargs="*")
     p.add_argument("--provider", default=None, help="fetch: the provider of the model")
-    p = add("models", help="the model dictionary (catalog.py): list, show, add, set, unset, note, rm, clone, link, unlink, \
+    p = add("models", help="the model dictionary (catalog.py): list, show, add, set, unset, note, since, rm, clone, link, unlink, \
 relate, suggest, seen")
-    p.add_argument("action", choices=("list", "show", "add", "set", "unset", "note", "rm", "clone", "link", "unlink",
+    p.add_argument("action", choices=("list", "show", "add", "set", "unset", "note", "since", "rm", "clone", "link", "unlink",
                                       "relate", "suggest", "seen"))
     p.add_argument("items", nargs="*", help="VENDOR/MODEL, then KEY=VALUE (add, set), a key (unset), the other id "
                                             "(clone, link, unlink, relate)")
     p.add_argument("--note", default=None, help="add: a note on the entry")
+    p.add_argument("--since", default=None, help="add: the implementation date (YYYY-MM-DD): the newest of a family is its master")
     p.add_argument("--link", action="store_true", help="clone: also link the copy to its source")
     p.add_argument("--force", action="store_true", help="clone: replace an entry that exists")
     p = add("viz", help="open the explorer here: a cmux split, else Kitty/Ghostty/WezTerm, else the browser (viz.py)")

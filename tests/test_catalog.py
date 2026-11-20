@@ -177,6 +177,85 @@ class Bonds(Base):
         self.assertEqual(dials.options(self.cfg(), "claude-sonnet-5", "bedrock")["top_k"], 9)
 
 
+class Dates(Base):
+    """The implementation date decides the master of a family or a link group: the newest implementation wins."""
+
+    def setUp(self):
+        super().setUp()
+        self.stamps = iter("2026-11-20T09:00:%02d" % n for n in range(60))
+        saved = catalog.now
+        catalog.now = lambda: next(self.stamps)
+        self.addCleanup(lambda: setattr(catalog, "now", saved))
+
+    def test_the_newest_member_of_a_family_is_the_master_whatever_the_ids(self):
+        catalog.add(self.root, "zeta/model-1.5", {"temperature": 0.1})      # id sorts last, written first
+        catalog.add(self.root, "alpha/model-1-5", {"temperature": 0.9})     # id sorts first, written second
+        self.assertEqual(catalog.master(self.cfg(), "zeta/model-1.5"), "alpha/model-1-5")
+        self.assertEqual(dials.options(self.cfg(), "model-1-5", "other")["temperature"], 0.9)
+        rows = {r.dial.key: r for r in dials.resolve(self.cfg(), "model-1-5", {}, "other")}
+        self.assertEqual(rows["ace_tokens"].source, "default")
+
+    def test_a_change_makes_the_entry_the_newest(self):
+        catalog.add(self.root, "a/model-1", {"temperature": 0.1})
+        catalog.add(self.root, "b/model-1", {"temperature": 0.2})
+        self.assertEqual(dials.options(self.cfg(), "model-1", "c")["temperature"], 0.2)
+        catalog.set_value(self.root, "a/model-1", "temperature", 0.3)
+        self.assertEqual(dials.options(self.cfg(), "model-1", "c")["temperature"], 0.3)
+        self.assertEqual(catalog.view(self.cfg(), "b/model-1")["master"], "a/model-1")
+
+    def test_since_names_the_implementation_and_beats_the_stamp_of_a_change(self):
+        catalog.add(self.root, "a/model-1", {"temperature": 0.1}, since="2026-12-01")
+        catalog.add(self.root, "b/model-1", {"temperature": 0.2})            # written later, but a/ is dated later
+        self.assertEqual(catalog.view(self.cfg(), "a/model-1")["date"], "2026-12-01")
+        self.assertEqual(catalog.master(self.cfg(), "b/model-1"), "a/model-1")
+        catalog.set_since(self.root, "a/model-1", "2026-01-01")
+        self.assertEqual(catalog.master(self.cfg(), "a/model-1"), "b/model-1")
+        catalog.set_since(self.root, "a/model-1", "")
+        self.assertEqual(catalog.view(self.cfg(), "a/model-1")["since"], "")
+        with self.assertRaises(ValueError):
+            catalog.set_since(self.root, "a/model-1", "yesterday")
+        with self.assertRaises(ValueError):
+            catalog.add(self.root, "c/model-1", since="11/20/2026")
+
+    def test_a_note_or_a_link_does_not_change_the_date(self):
+        catalog.add(self.root, "a/model-1")
+        before = catalog.view(self.cfg(), "a/model-1")["updated"]
+        catalog.set_note(self.root, "a/model-1", "x")
+        self.assertEqual(catalog.view(self.cfg(), "a/model-1")["updated"], before)
+
+    def test_a_link_group_reads_oldest_to_newest(self):
+        catalog.add(self.root, "m/own", {})
+        catalog.add(self.root, "z/old", {"top_k": 1})
+        catalog.add(self.root, "a/new", {"top_k": 2})
+        catalog.link(self.root, "m/own", "z/old")
+        catalog.link(self.root, "m/own", "a/new")
+        self.assertEqual(dials.options(self.cfg(), "own", "m")["top_k"], 2)
+        self.assertEqual(catalog.master(self.cfg(), "m/own"), "a/new")
+
+    def test_the_master_of_an_unlinked_family_member_is_itself(self):
+        catalog.add(self.root, "a/model-1")
+        catalog.add(self.root, "b/model-1")
+        catalog.unlink(self.root, "a/model-1", "b/model-1")
+        self.assertEqual(catalog.master(self.cfg(), "a/model-1"), "a/model-1")
+
+    def test_a_clone_dates_from_now_and_leaves_the_since_behind(self):
+        catalog.add(self.root, "a/model-1", {"top_k": 1}, since="2026-01-01")
+        v = catalog.clone(self.root, "a/model-1", "b")
+        self.assertEqual((v["since"], v["date"] > "2026-11-20"), ("", True))
+        self.assertEqual(v["master"], "b/model-1")
+
+    def test_the_command_sets_and_shows_the_date(self):
+        args = types.SimpleNamespace(action="add", items=["a/model-1", "top_k=1"], note=None, link=False, force=False,
+                                     since="2026-11-15")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(catalog.command(args, self.root), 0)
+        self.assertIn("date        2026-11-15  (since)", out.getvalue())
+        args = types.SimpleNamespace(action="since", items=["a/model-1", "-"], note=None, link=False, force=False)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(catalog.command(args, self.root), 0)
+        self.assertIn("(updated)", out.getvalue())
+
+
 class Clone(Base):
     def setUp(self):
         super().setUp()

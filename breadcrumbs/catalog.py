@@ -28,8 +28,11 @@ Three ways to relate entries:
           from you. `unlink` of a pair that is only a family stops the bond for that pair (it is kept in "unlinked").
 
 A request (a provider and a model) reads these layers, the lowest first: the entries of its family, then the entries
-linked to those or to its own, then its own (the vendor is the provider, or `*`; the exact name over a glob). Where two entries of one layer set the same key,
-the last by id wins (a family that disagrees is settled by an unlink of the member that should not count). A
+linked to those or to its own, then its own (the vendor is the provider, or `*`; the exact name over a glob). Where
+two entries of one layer set the same key, the newer implementation wins: each entry has a date, its "since" (the
+date you give it: when the model or the setting was put in use) or else its "updated" (stamped when its settings
+last changed), and a layer reads oldest to newest, so the newest member of a family or a link group is its master
+(view() names it). Undated entries are the oldest; a tie is settled by id. A
 dial resolves through them (dials.resolve) after the built-in entries and before the "models" globs of the file;
 dials.options adds them under the "models" globs. The source of a value names the entry and the bond.
 
@@ -39,6 +42,7 @@ import copy
 import fnmatch
 import os
 import re
+import time
 
 KEY = "catalog"
 GLOB = re.compile(r"[*?\[]")
@@ -48,6 +52,7 @@ _BEDROCK = re.compile(r"^(?:(?:us|eu|apac|global|us-gov)\.)?(?:anthropic|meta|am
                       r"openai|qwen|google|writer|stability|twelvelabs)\.")
 _VERSION = re.compile(r"-v\d+(?::\d+)?$")
 _DATE = re.compile(r"[-@](?:\d{8}|\d{4}-\d{2}-\d{2})$")
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?$")
 SEEN_LINE = re.compile(r"\bmodel=(\S+)(?:.*?\bprov=(\S+))?")
 
 
@@ -124,6 +129,35 @@ def _ok_id(ident):
         return False
 
 
+def now():
+    """The stamp of a change: local time, as the logs of breadcrumbs write it."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def stamp(entry):
+    """The implementation date of an entry, as text that sorts by time: its "since", else its "updated", else ""."""
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("since") or entry.get("updated") or "")
+
+
+def _by_date(entries, ids):
+    """ids oldest first: by implementation date, then by id."""
+    return sorted(ids, key=lambda i: (stamp(entries.get(i)), i))
+
+
+def master(cfg, ident):
+    """The id of the newest implementation among the entry, its links and its family (itself when it is alone)."""
+    entries, links, unlinked = section(cfg)
+    if ident not in entries:
+        raise KeyError("no entry %s" % ident)
+    veto = _vetoed(unlinked)
+    group = set(_groups(links).get(ident, ())) | {ident}
+    group |= {i for i in family_of(cfg, split_id(ident)[1], (ident,)) if frozenset((i, ident)) not in veto
+              and not GLOB.search(split_id(i)[1])} if not GLOB.search(split_id(ident)[1]) else set()
+    return _by_date(entries, [i for i in group if i in entries])[-1]
+
+
 def _settings(entry):
     s = entry.get("settings") if isinstance(entry, dict) else None
     return s if isinstance(s, dict) else {}
@@ -191,7 +225,8 @@ def bonds(cfg, provider, model):
     fam = [i for i in family_of(cfg, model, mine) if not any(frozenset((i, m)) in veto for m in mine)]
     group = _groups(links)
     seeds = set(mine) | set(fam)
-    mates = sorted({m for s in seeds for m in group.get(s, ()) if m in entries and m not in seeds})
+    mates = _by_date(entries, {m for s in seeds for m in group.get(s, ()) if m in entries and m not in seeds})
+    fam = _by_date(entries, fam)
     return [(i, "family") for i in fam] + [(i, "linked") for i in mates] + [(i, "own") for i in mine]
 
 
@@ -280,6 +315,8 @@ def view(cfg, ident, provider=None):
     return {"id": ident, "vendor": vendor, "model": model, "glob": bool(GLOB.search(model)),
             "family_key": "-".join(family_key(model) or ()) or None, "settings": copy.deepcopy(_settings(entry)),
             "note": entry.get("note") or "", "cloned_from": entry.get("cloned_from"),
+            "since": entry.get("since") or "", "updated": entry.get("updated") or "", "date": stamp(entry),
+            "master": master(cfg, ident),
             "links": sorted(group - {ident}), "family": fam,
             "unlinked": sorted(p for pair in unlinked if ident in pair for p in pair if p != ident),
             "inherits": inherits}
@@ -382,15 +419,24 @@ def _need(raw, ident):
         raise KeyError("no entry %s" % ident)
 
 
-def add(root, ident, settings=None, note=None, cloned_from=None):
-    """Create an entry. Refuses a second one of the same id. Returns the view."""
+def check_date(since):
+    if since and not DATE.match(str(since)):
+        raise ValueError("a date is YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS]: %r" % since)
+    return since
+
+
+def add(root, ident, settings=None, note=None, cloned_from=None, since=None):
+    """Create an entry. Refuses a second one of the same id. Returns the view. since: the implementation date."""
     split_id(ident)
     check_settings(settings or {})
+    check_date(since)
 
     def change(cfg, raw):
         if ident in raw["entries"]:
             raise ValueError("%s exists (set changes it, rm removes it)" % ident)
-        entry = {"settings": copy.deepcopy(settings or {})}
+        entry = {"settings": copy.deepcopy(settings or {}), "updated": now()}
+        if since:
+            entry["since"] = str(since)
         if note:
             entry["note"] = str(note)
         if cloned_from:
@@ -410,6 +456,7 @@ def set_value(root, ident, key, value):
         if not isinstance(entry.get("settings"), dict):
             entry["settings"] = {}
         entry["settings"][key] = value
+        entry["updated"] = now()
 
     return view(_edit(root, change), ident)
 
@@ -419,6 +466,22 @@ def unset(root, ident, key):
     def change(cfg, raw):
         _need(raw, ident)
         _settings(raw["entries"][ident]).pop(key, None)
+        raw["entries"][ident]["updated"] = now()
+
+    return view(_edit(root, change), ident)
+
+
+def set_since(root, ident, since):
+    """Set the implementation date of an entry (YYYY-MM-DD, or with the time); empty clears it, and the entry then
+    dates by its last change. This is what decides the master of a family or a link group."""
+    check_date(since)
+
+    def change(cfg, raw):
+        _need(raw, ident)
+        if since:
+            raw["entries"][ident]["since"] = str(since)
+        else:
+            raw["entries"][ident].pop("since", None)
 
     return view(_edit(root, change), ident)
 
@@ -470,6 +533,8 @@ def clone(root, src, dst, link=False, force=False):
             raise ValueError("%s exists (--force replaces it)" % dst)
         entry = copy.deepcopy(raw["entries"][src])
         entry["cloned_from"] = src
+        entry.pop("since", None)  # a copy is a new implementation: it dates from now
+        entry["updated"] = now()
         raw["entries"][dst] = entry
         if link:
             raw["links"].append([src, dst])
@@ -531,6 +596,9 @@ def lines(v):
         out.append("  note        %s" % v["note"])
     if v["cloned_from"]:
         out.append("  cloned from %s" % v["cloned_from"])
+    out.append("  date        %s%s" % (v["date"] or "(undated)", "  (since)" if v["since"] else "  (updated)" if v["updated"] else ""))
+    if v["master"] != v["id"]:
+        out.append("  master      %s (the newer implementation of this family)" % v["master"])
     for key, value in sorted(v["settings"].items()):
         out.append("  %-18s %r" % (key, value))
     if not v["settings"]:
@@ -544,7 +612,7 @@ def lines(v):
 
 
 def command(args, home):
-    """`python -m breadcrumbs models list|show|add|set|unset|note|rm|clone|link|unlink|relate|suggest|seen`."""
+    """`python -m breadcrumbs models list|show|add|set|unset|note|since|rm|clone|link|unlink|relate|suggest|seen`."""
     import sys
 
     from . import dials
@@ -557,7 +625,8 @@ def command(args, home):
             if not r:
                 print("no entries (add VENDOR/MODEL [KEY=VALUE ...])")
             for v in r:
-                print("%-44s %s%s" % (v["id"], ", ".join("%s=%s" % kv for kv in sorted(v["settings"].items())) or "-",
+                print("%-44s %-19s %s%s" % (v["id"], v["date"] or "-",
+                                            ", ".join("%s=%s" % kv for kv in sorted(v["settings"].items())) or "-",
                                       "   <- " + ", ".join(v["links"] + v["family"]) if v["links"] or v["family"] else ""))
             return 0
         if act == "suggest":
@@ -588,7 +657,7 @@ def command(args, home):
                 if not sep:
                     raise ValueError("a setting is KEY=VALUE: %r" % pair)
                 settings[key] = _value(text)
-            print("\n".join(lines(add(home, ident, settings, args.note))))
+            print("\n".join(lines(add(home, ident, settings, args.note, since=getattr(args, "since", None)))))
         elif act == "set":
             if len(items) < 2 or "=" not in items[1]:
                 raise ValueError("set ID KEY=VALUE")
@@ -596,6 +665,10 @@ def command(args, home):
             print("\n".join(lines(set_value(home, ident, key, _value(text)))))
         elif act == "unset":
             print("\n".join(lines(unset(home, ident, items[1]))))
+        elif act == "since":
+            if len(items) < 2:
+                raise ValueError("since ID DATE (DATE: YYYY-MM-DD, or - to clear)")
+            print("\n".join(lines(set_since(home, ident, "" if items[1] == "-" else items[1]))))
         elif act == "note":
             print("\n".join(lines(set_note(home, ident, " ".join(items[1:])))))
         elif act == "rm":
@@ -620,7 +693,7 @@ def command(args, home):
 
 def apply(root, action, payload=None):
     """The widget's call: one action on the folder's file. Returns {"entries": rows, "suggest": [...]} after it.
-    Actions: get, add, set, unset, note, rm, clone, link, unlink, relate."""
+    Actions: get, add, set, unset, note, since, rm, clone, link, unlink, relate."""
     from . import dials
 
     p = dict(payload or {})
@@ -633,6 +706,8 @@ def apply(root, action, payload=None):
         unset(root, ident, p.get("key"))
     elif action == "note":
         set_note(root, ident, p.get("note"))
+    elif action == "since":
+        set_since(root, ident, p.get("since"))
     elif action == "rm":
         remove(root, ident)
     elif action == "clone":
