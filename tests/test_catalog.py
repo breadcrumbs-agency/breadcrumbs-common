@@ -59,7 +59,7 @@ class Crud(Base):
         catalog.unset(self.root, "anthropic/claude-haiku-5-5", "temperature")
         self.assertNotIn("temperature", catalog.view(self.cfg(), "anthropic/claude-haiku-5-5")["settings"])
         catalog.remove(self.root, "anthropic/claude-haiku-5-5")
-        self.assertEqual(catalog.rows(self.cfg()), [])
+        self.assertEqual([r for r in catalog.rows(self.cfg()) if not r["builtin"]], [])
 
     def test_a_bad_value_is_refused_and_nothing_is_written(self):
         for key, value in (("ace_tokens", "many"), ("ace_tokens", 0), ("ace_typo", 1), ("temperature", object())):
@@ -321,7 +321,7 @@ class Export(Base):
         self.assertEqual(got["export"]["format"], catalog.FORMAT)
         there = self.other()
         got = catalog.apply(there, "import", {"document": got["export"]})
-        self.assertEqual(len(got["entries"]), 2)
+        self.assertEqual(len([e for e in got["entries"] if not e["builtin"]]), 2)
 
 
 class Clone(Base):
@@ -393,10 +393,10 @@ class Discovery(Base):
 
     def test_the_widget_lists_the_catalog_and_applies_an_action(self):
         got = catalog.apply(self.root, "add", {"id": "anthropic/x", "settings": {"top_k": 3}})
-        self.assertEqual([e["id"] for e in got["entries"]], ["anthropic/x"])
+        self.assertEqual([e["id"] for e in got["entries"] if not e["builtin"]], ["anthropic/x"])
         got = catalog.apply(self.root, "clone", {"id": "anthropic/x", "to": "nous"})
-        self.assertEqual([e["id"] for e in got["entries"]], ["anthropic/x", "nous/x"])
-        self.assertEqual(dials.settings(self.root, environ={})["catalog"], ["anthropic/x", "nous/x"])
+        self.assertEqual([e["id"] for e in got["entries"] if not e["builtin"]], ["anthropic/x", "nous/x"])
+        self.assertEqual([i for i in dials.settings(self.root, environ={})["catalog"] if not i.startswith("*/")], ["anthropic/x", "nous/x"])
         with self.assertRaises(ValueError):
             catalog.apply(self.root, "explode", {})
 
@@ -445,6 +445,45 @@ class Command(Base):
                            capture_output=True, text=True, cwd=repo, env={**os.environ, "PYTHONPATH": repo})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("top_k", r.stdout)
+
+
+class BuiltIn(unittest.TestCase):
+    """Haiku 5.5 is a visible entry, and the example of a cost model."""
+    ID = "*/*haiku-5[.-]5*"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def test_it_is_listed_with_its_cost_model_in_an_empty_file(self):
+        v = {r["id"]: r for r in catalog.rows({})}[self.ID]
+        self.assertTrue(v["builtin"])
+        self.assertEqual(v["settings"], {"ace_ceiling": 94000})
+        self.assertIn("100,000", v["note"])
+        self.assertEqual([t["upto"] for t in v["cost"]["tiers"]], [100000, None])
+        self.assertEqual(v["cost"]["tiers"][1]["input"], 0.5)
+        self.assertTrue(v["cost"]["sources"])
+        # the same cost model shows beside an entry of one vendor that it prices
+        catalog.add(self.root, "anthropic/claude-haiku-5-5")
+        self.assertEqual(catalog.view(dials.config(self.root), "anthropic/claude-haiku-5-5")["cost"]["name"], "*haiku-5[.-]5*")
+        self.assertIn(self.ID, [i["id"] for i in catalog.view(dials.config(self.root), "anthropic/claude-haiku-5-5")["inherits"]])
+
+    def test_a_change_copies_it_into_the_file_and_removing_the_copy_gives_it_back(self):
+        v = catalog.set_value(self.root, self.ID, "ace_ceiling", 90000)
+        self.assertEqual((v["builtin"], v["overrides_builtin"], v["settings"]), (False, True, {"ace_ceiling": 90000}))
+        self.assertEqual(dials.value(dials.config(self.root), "claude-haiku-5-5", "ace_ceiling", environ={}), 90000)
+        catalog.remove(self.root, self.ID)
+        self.assertEqual(dials.value(dials.config(self.root), "claude-haiku-5-5", "ace_ceiling", environ={}), 94000)
+        self.assertTrue(catalog.view(dials.config(self.root), self.ID)["builtin"])
+        with self.assertRaises(ValueError):  # nothing of it is in the file
+            catalog.remove(self.root, self.ID)
+
+    def test_it_is_cloned_for_another_model_and_never_exported(self):
+        v = catalog.clone(self.root, self.ID, "nous/claude-haiku-6-0")
+        self.assertEqual((v["settings"], v["cloned_from"]), ({"ace_ceiling": 94000}, self.ID))
+        self.assertNotIn(self.ID, catalog.export(dials.config(self.root))["entries"])
+        self.assertIn("cost model", "\n".join(catalog.lines(catalog.view({}, self.ID))))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,13 @@ last changed), and a layer reads oldest to newest, so the newest member of a fam
 dial resolves through them (dials.resolve) after the built-in entries and before the "models" globs of the file;
 dials.options adds them under the "models" globs. The source of a value names the entry and the bond.
 
+Built-in entries (builtin()) come with breadcrumbs and show in every list, flagged "builtin". Claude Haiku 5.5 is the
+example of a cost model: its price per token steps up with the size of the prompt, so its entry carries the ceiling
+that keeps a request under the step (ace_ceiling), and each entry that a cost profile (costs.py) prices shows that
+profile beside its settings ("cost": the tiers, the context window and the sources). Changing a built-in entry
+copies it into the file first (the copy is a file entry of the same id and wins, as any file entry does); removing
+the copy gives the built-in one back. Resolution reads the built-in ones as it always did (dials.MODELS).
+
 Mutations take the folder of the file (like dials.set_setting) and return the entry as the widget shows it.
 """
 import copy
@@ -105,6 +112,55 @@ def _near(a, b):
     """The share of words that two names have in common (0 to 1)."""
     ta, tb = set(tokens(a)), set(tokens(b))
     return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+
+
+def builtin():
+    """{id: entry} of the entries that come with breadcrumbs: one for each built-in model entry of dials (MODELS),
+    named by the glob of the model under the vendor `*`. Each carries a note that says how its value follows from
+    its cost profile."""
+    from . import costs, dials
+
+    out = {}
+    for glob, opts in dials.MODELS.items():
+        prof = costs.BUILTIN.get(glob) or {}
+        step = dials.PRICE_STEPS.get(glob)
+        rates = list(prof.get("tiers", ()))
+        note = "built in; a cost model."
+        if step and len(rates) > 1:
+            note += (" The price steps up at %s prompt tokens (input %g, then %g USD per 1M), so ace_ceiling is the "
+                     "step less the %g%% that the token estimate reads low, down to the thousand: %s. A request "
+                     "then stays under the step. Clone it for another model with a price step."
+                     % (format(step, ","), rates[0]["input"], rates[1]["input"], dials.UNDER_READ * 100,
+                        format(opts.get("ace_ceiling", 0), ",")))
+        out[make_id("*", glob)] = {"settings": copy.deepcopy(opts), "note": note, "builtin": True}
+    return out
+
+
+def with_builtin(cfg):
+    """cfg with the built-in entries added to the catalog where the file has no entry of that id."""
+    entries, links, unlinked = section(cfg)
+    extra = {i: e for i, e in builtin().items() if i not in entries}
+    if not extra:
+        return cfg
+    out = dict(cfg)
+    raw = dict(cfg.get(KEY)) if isinstance(cfg.get(KEY), dict) else {}
+    raw["entries"] = {**entries, **extra}
+    out[KEY] = raw
+    return out
+
+
+def cost_of(model):
+    """The cost profile that prices a model (costs.lookup), as plain data, or None: {name, context_window, tiers, sources}."""
+    from . import costs
+
+    if not model:
+        return None
+    name, prof = costs.lookup(model) if not GLOB.search(model) else (model, costs.profiles()[0].get(model))
+    if not prof:
+        return None
+    return {"name": name, "context_window": prof.get("context_window"),
+            "tiers": [dict(rates, upto=upto) for upto, rates in prof["tiers"]],
+            "sources": [dict(x) for x in prof.get("sources", ())]}
 
 
 def section(cfg):
@@ -302,6 +358,9 @@ def problems(cfg):
 def view(cfg, ident, provider=None):
     """One entry as the widget shows it: settings, note, source, the links, the family, the vetoes, and what a
     request for its own model reads from the other entries."""
+    shown = set(builtin())
+    filed = set(section(cfg)[0])
+    cfg = with_builtin(cfg)
     entries, links, unlinked = section(cfg)
     if ident not in entries:
         raise KeyError("no entry %s" % ident)
@@ -320,12 +379,13 @@ def view(cfg, ident, provider=None):
             "master": master(cfg, ident),
             "links": sorted(group - {ident}), "family": fam,
             "unlinked": sorted(p for pair in unlinked if ident in pair for p in pair if p != ident),
-            "inherits": inherits}
+            "inherits": inherits, "builtin": ident in shown and ident not in filed,
+            "overrides_builtin": ident in shown and ident in filed, "cost": cost_of(model)}
 
 
 def rows(cfg):
     """Every entry, by vendor then model: the list that the widget shows."""
-    entries, _, _ = section(cfg)
+    entries, _, _ = section(with_builtin(cfg))
     return [view(cfg, i) for i in sorted(entries, key=lambda i: (split_id(i)[0], split_id(i)[1].lower()))]
 
 
@@ -416,6 +476,11 @@ def _edit(root, change):
 
 
 def _need(raw, ident):
+    if ident not in raw["entries"] and ident in builtin():  # a built-in entry is copied into the file, then changed
+        entry = copy.deepcopy(builtin()[ident])
+        entry.pop("builtin", None)
+        entry["updated"] = now()
+        raw["entries"][ident] = entry
     if ident not in raw["entries"]:
         raise KeyError("no entry %s" % ident)
 
@@ -503,6 +568,8 @@ def remove(root, ident):
     bound = []
 
     def change(cfg, raw):
+        if ident not in raw["entries"] and ident in builtin():
+            raise ValueError("%s is built in: nothing of it is in the file (set a value to override it)" % ident)
         _need(raw, ident)
         del raw["entries"][ident]
         for name in ("links", "unlinked"):
@@ -529,10 +596,13 @@ def clone(root, src, dst, link=False, force=False):
         raise ValueError("clone needs another id than %s" % src)
 
     def change(cfg, raw):
-        _need(raw, src)
+        if src not in raw["entries"] and src not in builtin():
+            raise KeyError("no entry %s" % src)
         if dst in raw["entries"] and not force:
             raise ValueError("%s exists (--force replaces it)" % dst)
-        entry = copy.deepcopy(raw["entries"][src])
+        entry = copy.deepcopy(raw["entries"].get(src) or builtin()[src])  # a built-in source stays out of the file
+        if entry.pop("builtin", None):
+            entry["note"] = "cloned from %s (a built-in entry)" % src
         entry["cloned_from"] = src
         entry.pop("since", None)  # a copy is a new implementation: it dates from now
         entry["updated"] = now()
@@ -678,6 +748,17 @@ def lines(v):
             out.append("  %-11s %s" % (label, ", ".join(items)))
     for item in v["inherits"]:
         out.append("  reads from  %s (%s)" % (item["id"], item["how"]))
+    if v.get("builtin"):
+        out.append("  built in    (a copy in the file overrides it)")
+    cost = v.get("cost")
+    if cost:
+        out.append("  cost model  %s" % cost["name"])
+        for t in cost["tiers"]:
+            out.append("    %-14s input %g  output %g  cache read %g  cache write %g (USD per 1M)"
+                       % ("up to %s" % format(t["upto"], ",") if t["upto"] else "above", t["input"], t["output"],
+                          t["cache_read"], t["cache_write"]))
+        if cost.get("context_window"):
+            out.append("    context window %s tokens" % format(cost["context_window"], ","))
     return out
 
 
