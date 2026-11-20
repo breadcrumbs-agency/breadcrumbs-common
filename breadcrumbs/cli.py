@@ -306,6 +306,15 @@ def main(argv=None):
                          "template, set FILE [MODEL], remove")
     p.add_argument("action", choices=("show", "fetch", "template", "set", "remove")); p.add_argument("items", nargs="*")
     p.add_argument("--provider", default=None, help="fetch: the provider of the model")
+    p = add("models", help="the model dictionary (catalog.py): list, show, add, set, unset, note, rm, clone, link, unlink, \
+relate, suggest, seen")
+    p.add_argument("action", choices=("list", "show", "add", "set", "unset", "note", "rm", "clone", "link", "unlink",
+                                      "relate", "suggest", "seen"))
+    p.add_argument("items", nargs="*", help="VENDOR/MODEL, then KEY=VALUE (add, set), a key (unset), the other id "
+                                            "(clone, link, unlink, relate)")
+    p.add_argument("--note", default=None, help="add: a note on the entry")
+    p.add_argument("--link", action="store_true", help="clone: also link the copy to its source")
+    p.add_argument("--force", action="store_true", help="clone: replace an entry that exists")
     p = add("viz", help="open the explorer here: a cmux split, else Kitty/Ghostty/WezTerm, else the browser (viz.py)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--where", action="store_true", help="print the terminal found and what viz would do here; open nothing")
@@ -365,6 +374,9 @@ def main(argv=None):
         from . import dials
         print(dials.markdown() if args.markdown else "\n".join(dials.show(home, args.model)))
         return 0
+    if args.cmd == "models":
+        from . import catalog
+        return catalog.command(args, home)
     if args.cmd == "cost":
         from . import costs
         args.file = args.items[0] if args.action == "set" and args.items else None

@@ -27,6 +27,11 @@ A "models" entry also holds the request options of a model (temperature, top_p, 
 dial and does not start with "ace_". So one entry holds a model's temperature and the ACE dials that suit that
 temperature (ace_core.Engine._dial). A harness that can change its request sends them
 (breadcrumbs_hermes/options.py).
+
+The model dictionary (catalog.py, the "catalog" of the file) holds the same for a model of a vendor, with clones,
+links between vendors and an association made for you between names that read alike. Its entries count after the
+built-in ones and before the "models" globs, so a glob of "models" still has the last word of the file. A caller
+that knows the provider gives it (provider=) so the vendor of an entry counts; without it any vendor fits.
 """
 import fnmatch
 import json
@@ -34,7 +39,7 @@ import os
 from collections import namedtuple
 import tempfile
 
-from . import costs
+from . import catalog, costs
 
 # key, default, kind (int, float, bool), lo, hi (None: no bound), group, environment variable, meaning
 Dial = namedtuple("Dial", "key default kind lo hi group env doc")
@@ -137,6 +142,7 @@ MODELS = {glob: {"ace_ceiling": int(step * (1 - UNDER_READ)) // 1000 * 1000} for
 # other modules read.
 OTHER_KEYS = {
     "models": "dials per model: a glob of the model name -> any dial above",
+    "catalog": "the model dictionary: an entry for each VENDOR/MODEL, with clones and links (breadcrumbs/catalog.py)",
     "hive": "other hosts to search: {\"ms\": 150, \"peers\": {...}} (breadcrumbs/hive.py)",
     "slot": "the name of another memory provider that runs through breadcrumbs (breadcrumbs/slot.py)",
     "scope": "\"off\": every chat uses the profile's default memory, not the memory of its git repository or folder "
@@ -245,7 +251,7 @@ def settings_chain(chain, model=None, environ=None):
     return {"path": os.path.join(chain[-1][1], "config.json"), "model": model,
             "chain": [{"label": label, "path": os.path.join(folder, "config.json"),
                        "exists": os.path.isfile(os.path.join(folder, "config.json"))} for label, folder in chain],
-            "models": list(patterns), "groups": [
+            "models": list(patterns), "catalog": [e["id"] for e in catalog.rows(cfg)], "groups": [
                 {"name": group, "rows": [r for r in rows if r["group"] == group]}
                 for group in sorted(dict.fromkeys(r["group"] for r in rows), key=_group_rank)
             ]}
@@ -331,10 +337,14 @@ def chain_of(cfg):
     return [("config", cfg if isinstance(cfg, dict) else {})]
 
 
-def options(cfg, model):
-    """The dials of model: each glob of "models" that matches its name, merged in file order (in a chain: each file in
-    chain order, so a scope's entry beats its profile's)."""
+def options(cfg, model, provider=None):
+    """The dials of model: the catalog entries that its name and provider bond to (catalog.layers), then each glob of
+    "models" that matches its name, merged in file order (in a chain: each file in chain order, so a scope's entry
+    beats its profile's)."""
     out, name = {}, str(model or "").lower()
+    for _label, c in chain_of(cfg):
+        for _name, layer in catalog.layers(c, provider, model):
+            out.update(layer)
     for _label, c in chain_of(cfg):
         models = c.get("models")
         for glob, opts in (models.items() if isinstance(models, dict) else ()):
@@ -381,7 +391,7 @@ def from_env(d, environ):
 Row = namedtuple("Row", "dial value source problems")
 
 
-def resolve(cfg, model=None, environ=None):
+def resolve(cfg, model=None, environ=None, provider=None):
     """One Row for each dial: the value that counts, where it came from, and what was ignored on the way. cfg is one
     file (a dict) or a chain of files (chain_of); a source names the file by its label, and in a chain a "models"
     entry by its file's label too."""
@@ -395,6 +405,8 @@ def resolve(cfg, model=None, environ=None):
         layers = list(chain)
         layers += [('models["%s"] (built in)' % glob, opts) for glob, opts in MODELS.items()
                    if fnmatch.fnmatchcase(mname, glob)]
+        for label, c in chain:
+            layers += [(name if one else label + " " + name, layer) for name, layer in catalog.layers(c, provider, model)]
         for label, c in chain:
             models = c.get("models")
             for glob, opts in (models.items() if isinstance(models, dict) else ()):
@@ -417,9 +429,9 @@ def resolve(cfg, model=None, environ=None):
     return rows
 
 
-def value(cfg, model, key, environ=None):
+def value(cfg, model, key, environ=None, provider=None):
     """The value of one dial (see resolve). environ={} leaves the environment out."""
-    return next(r.value for r in resolve(cfg, model, environ) if r.dial.key == key)
+    return next(r.value for r in resolve(cfg, model, environ, provider) if r.dial.key == key)
 
 
 def env_value(key):
@@ -444,7 +456,7 @@ def unknown(cfg):
             out.append('models["%s"]: not an object; ignored' % glob)
             continue
         out += ['models["%s"] %s: no such dial' % (glob, k) for k in opts if k not in BY_KEY and k.startswith("ace_")]
-    return out
+    return out + catalog.problems(cfg)
 
 
 def _fmt(v):
