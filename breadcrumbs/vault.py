@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 
+from . import atomic
 from .crumbs import Crumb, get_crumb, put_crumb
 from .history import commit
 from .index import cue_edges
@@ -206,9 +207,7 @@ def _write(out, files):
                     continue
         except OSError:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path + ".tmp", "wb") as f:
-            f.write(files[rel])
-        os.replace(path + ".tmp", path)
+        atomic.write(path, files[rel])
         written += 1
     keep = {rel.casefold() for rel in files}
     for rel in old:
@@ -219,9 +218,7 @@ def _write(out, files):
         if os.path.isfile(path):
             os.remove(path)
             removed += 1
-    with open(manifest + ".tmp", "w", encoding="utf-8", newline="\n") as f:
-        f.write("".join(rel + "\n" for rel in sorted(files)))
-    os.replace(manifest + ".tmp", manifest)
+    atomic.write(manifest, "".join(rel + "\n" for rel in sorted(files)))
     return written, removed
 
 

@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 
+from . import atomic
 from .crumbs import Crumb, get_crumb, put_crumb
 from .lines import decode_spine, put_text, split_lines
 from .store import format_id
@@ -202,10 +203,7 @@ def export_car(store, crumb_ids, path):
     out += varint(len(header)) + header
     for cb, data in ex.blocks.items():
         out += varint(len(cb) + len(data)) + cb + data
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(out)
-    os.replace(tmp, path)
+    atomic.write(path, bytes(out))
     return roots, {"blocks": len(ex.blocks), "bytes": len(out), "withheld": ex.withheld}
 
 
@@ -281,41 +279,46 @@ def _ancestors(store, head):
 
 def project_add(store, refs, name, crumb_ids):
     """Add public copies of crumbs (with their kids) to a project: a new head over the old one."""
-    old = refs.get(PROJ + name)
-    kids = list(get_crumb(store, old).kids) if old else []
-    for i in crumb_ids:
-        pub = publish(store, i, deep=True)
-        if pub not in kids:
-            kids.append(pub)
-    head = put_crumb(store, Crumb("proj", name, kids=kids, heritage=[old] if old else [], public=True))
-    refs.set(PROJ + name, head)
+    with refs.locked():  # one writer of the head from its read to its write; the head is on disk before the ref names it
+        old = refs.get(PROJ + name)
+        kids = list(get_crumb(store, old).kids) if old else []
+        for i in crumb_ids:
+            pub = publish(store, i, deep=True)
+            if pub not in kids:
+                kids.append(pub)
+        head = put_crumb(store, Crumb("proj", name, kids=kids, heritage=[old] if old else [], public=True))
+        store.flush()
+        refs.set(PROJ + name, head)
     return head
 
 
 def project_join(store, refs, name, other):
     """Join another head into the project; returns the new local head."""
-    ours = refs.get(PROJ + name)
-    if ours is None or ours in _ancestors(store, other):
-        head = other
-    elif other in _ancestors(store, ours):
-        head = ours
-    else:
-        first, second = sorted((ours, other))
-        kids = list(get_crumb(store, first).kids)
-        kids += [k for k in get_crumb(store, second).kids if k not in kids]
-        head = put_crumb(store, Crumb("proj", name, kids=kids, heritage=[first, second], public=True))
-    refs.set(PROJ + name, head)
+    with refs.locked():
+        ours = refs.get(PROJ + name)
+        if ours is None or ours in _ancestors(store, other):
+            head = other
+        elif other in _ancestors(store, ours):
+            head = ours
+        else:
+            first, second = sorted((ours, other))
+            kids = list(get_crumb(store, first).kids)
+            kids += [k for k in get_crumb(store, second).kids if k not in kids]
+            head = put_crumb(store, Crumb("proj", name, kids=kids, heritage=[first, second], public=True))
+        store.flush()
+        refs.set(PROJ + name, head)
     return head
 
 
 def push(store, refs, name, path):
     """Write the project head to a CAR file and keep the copy rebuilt from it. Returns (cid, head)."""
-    head = refs.get(PROJ + name)
-    if head is None:
-        raise KeyError(PROJ + name)
-    roots, _ = export_car(store, [head], path)
-    canon = import_car(store, None, path)[0]  # our own texts are indexed already
-    refs.set(PROJ + name, canon)
+    with refs.locked():
+        head = refs.get(PROJ + name)
+        if head is None:
+            raise KeyError(PROJ + name)
+        roots, _ = export_car(store, [head], path)
+        canon = import_car(store, None, path)[0]  # our own texts are indexed already (import_car flushes the store)
+        refs.set(PROJ + name, canon)
     return roots[0], canon
 
 

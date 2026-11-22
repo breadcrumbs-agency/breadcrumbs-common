@@ -24,7 +24,8 @@ import fnmatch
 import json
 import os
 import sys
-import tempfile
+
+from . import atomic
 
 RATES = ("input", "output", "cache_read", "cache_write")
 FIELDS = {"context_window", "tiers", "sources"}
@@ -290,13 +291,15 @@ def fetch_brief(model, root=None, harness_price=None):
 def _write(root, models):
     os.makedirs(root, exist_ok=True)
     path = os.path.join(root, "costs.json")
-    fd, tmp = tempfile.mkstemp(dir=root, prefix=".costs.", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"models": models}, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
+    atomic.write(path, json.dumps({"models": models}, indent=2, ensure_ascii=False) + "\n")
     _cache.clear()
     return path
+
+
+def _editing(root):
+    """One editor of <root>/costs.json at a time, from its read of the file to its write (the lock of the folder)."""
+    os.makedirs(root, exist_ok=True)
+    return atomic.locked(root)
 
 
 def _saved_objects(root):
@@ -318,9 +321,10 @@ def set_profile(root, model, raw):
     prof, bad = validate(raw)
     if bad:
         return False, bad
-    models = _saved_objects(root)
-    models[model] = to_file(prof)
-    _write(root, models)
+    with _editing(root):
+        models = _saved_objects(root)
+        models[model] = to_file(prof)
+        _write(root, models)
     lines = ["saved %s in %s" % (model, os.path.join(root, "costs.json"))]
     for ptok in (50_000, 150_000):
         r = tier_for(prof, ptok)
@@ -330,11 +334,12 @@ def set_profile(root, model, raw):
 
 
 def remove(root, model):
-    models = _saved_objects(root)
-    if model not in models:
-        return False
-    del models[model]
-    _write(root, models)
+    with _editing(root):
+        models = _saved_objects(root)
+        if model not in models:
+            return False
+        del models[model]
+        _write(root, models)
     return True
 
 

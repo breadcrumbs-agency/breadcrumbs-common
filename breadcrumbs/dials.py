@@ -37,9 +37,8 @@ import fnmatch
 import json
 import os
 from collections import namedtuple
-import tempfile
 
-from . import catalog, costs
+from . import atomic, catalog, costs
 
 # key, default, kind (int, float, bool), lo, hi (None: no bound), group, environment variable, meaning
 Dial = namedtuple("Dial", "key default kind lo hi group env doc")
@@ -201,19 +200,7 @@ def _config_for_write(root):
 def _write_config(root, cfg):
     """Atomically write config.json, keeping an interrupted edit from leaving half a file."""
     os.makedirs(root, exist_ok=True)
-    path = os.path.join(root, "config.json")
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=root, delete=False) as f:
-        staging = f.name
-        json.dump(cfg, f, ensure_ascii=False, indent=2, sort_keys=True)
-        f.write("\n")
-    try:
-        os.replace(staging, path)
-    except BaseException:
-        try:
-            os.unlink(staging)
-        except OSError:
-            pass
-        raise
+    atomic.write(os.path.join(root, "config.json"), json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 # The order of the ACE groups in the console: where a chat folds (thresholds), what makes the target grow, what a fold
@@ -264,6 +251,14 @@ def settings_chain(chain, model=None, environ=None):
             ]}
 
 
+def _editing(root):
+    """One editor of <root>/config.json at a time, from its read of the file to its write, across threads and
+    processes (the widget of two viewers, a command line beside them). Without it each editor wrote the file that it
+    had read, and the change of the other was lost. The lock is on the folder, so it makes no file."""
+    os.makedirs(root, exist_ok=True)
+    return atomic.locked(root)
+
+
 def set_setting(root, key, value, model=None):
     """Create or replace one common dial override and return the new description."""
     if key not in BY_KEY:
@@ -272,20 +267,21 @@ def set_setting(root, key, value, model=None):
     if valid(d, value) is None:
         raise ValueError("%s must be %s" % (key, _want(d)))
     model = str(model or "")
-    cfg = _config_for_write(root)
-    if model and key != "update_ms":
-        models = cfg.get("models")
-        if models is None:
-            models = cfg["models"] = {}
-        if not isinstance(models, dict):
-            raise ValueError("cannot edit breadcrumbs config.json: models must be an object")
-        layer = models.setdefault(model, {})
-        if not isinstance(layer, dict):
-            raise ValueError("cannot edit breadcrumbs config.json: model entry must be an object")
-        layer[key] = value
-    else:
-        cfg[key] = value
-    _write_config(root, cfg)
+    with _editing(root):
+        cfg = _config_for_write(root)
+        if model and key != "update_ms":
+            models = cfg.get("models")
+            if models is None:
+                models = cfg["models"] = {}
+            if not isinstance(models, dict):
+                raise ValueError("cannot edit breadcrumbs config.json: models must be an object")
+            layer = models.setdefault(model, {})
+            if not isinstance(layer, dict):
+                raise ValueError("cannot edit breadcrumbs config.json: model entry must be an object")
+            layer[key] = value
+        else:
+            cfg[key] = value
+        _write_config(root, cfg)
     return settings(root, model)
 
 
@@ -294,14 +290,15 @@ def delete_setting(root, key, model=None):
     if key not in BY_KEY:
         raise ValueError("unknown breadcrumbs dial: %s" % key)
     model = str(model or "")
-    cfg = _config_for_write(root)
-    models = cfg.get("models")
-    layer = models.get(model, {}) if model and isinstance(models, dict) else cfg
-    if isinstance(layer, dict):
-        layer.pop(key, None)
-        if model and isinstance(models, dict) and not layer:
-            models.pop(model, None)
-    _write_config(root, cfg)
+    with _editing(root):
+        cfg = _config_for_write(root)
+        models = cfg.get("models")
+        layer = models.get(model, {}) if model and isinstance(models, dict) else cfg
+        if isinstance(layer, dict):
+            layer.pop(key, None)
+            if model and isinstance(models, dict) and not layer:
+                models.pop(model, None)
+        _write_config(root, cfg)
     return settings(root, model)
 
 
@@ -313,27 +310,28 @@ def reset_settings(root, model=None, all_models=False):
     from every model entry while preserving non-dial request options.
     """
     model = str(model or "")
-    cfg = _config_for_write(root)
-    if model:
-        models = cfg.get("models")
-        layer = models.get(model, {}) if isinstance(models, dict) else {}
-        if isinstance(layer, dict):
+    with _editing(root):
+        cfg = _config_for_write(root)
+        if model:
+            models = cfg.get("models")
+            layer = models.get(model, {}) if isinstance(models, dict) else {}
+            if isinstance(layer, dict):
+                for key in BY_KEY:
+                    layer.pop(key, None)
+                if isinstance(models, dict) and not layer:
+                    models.pop(model, None)
+        else:
             for key in BY_KEY:
-                layer.pop(key, None)
-            if isinstance(models, dict) and not layer:
-                models.pop(model, None)
-    else:
-        for key in BY_KEY:
-            cfg.pop(key, None)
-        if all_models and isinstance(cfg.get("models"), dict):
-            for name in list(cfg["models"]):
-                layer = cfg["models"][name]
-                if isinstance(layer, dict):
-                    for key in BY_KEY:
-                        layer.pop(key, None)
-                    if not layer:
-                        cfg["models"].pop(name, None)
-    _write_config(root, cfg)
+                cfg.pop(key, None)
+            if all_models and isinstance(cfg.get("models"), dict):
+                for name in list(cfg["models"]):
+                    layer = cfg["models"][name]
+                    if isinstance(layer, dict):
+                        for key in BY_KEY:
+                            layer.pop(key, None)
+                        if not layer:
+                            cfg["models"].pop(name, None)
+        _write_config(root, cfg)
     return settings(root, model)
 
 

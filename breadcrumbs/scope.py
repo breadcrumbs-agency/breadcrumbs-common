@@ -25,6 +25,8 @@ import json
 import os
 import re
 
+from . import atomic
+
 MARKER = ".breadcrumbs"
 SOURCE_MARKERS = ("pyproject.toml", "setup.py", "package.json", "Cargo.toml", "go.mod", "pom.xml", "build.gradle",
                   "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "CMakeLists.txt", "Makefile", "Gemfile",
@@ -175,10 +177,7 @@ def ensure(base, kind, root):
                 return home
     except (OSError, ValueError):
         pass
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f)
-    os.replace(tmp, path)
+    atomic.write(path, json.dumps(meta))
     return home
 
 
