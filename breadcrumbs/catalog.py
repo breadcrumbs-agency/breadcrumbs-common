@@ -451,27 +451,28 @@ def _edit(root, change):
     """Read the file of root (refusing a bad one), let change(cfg, catalog) alter it, write it, give back the config."""
     from . import dials
 
-    cfg = dials._config_for_write(root)
-    raw = cfg.get(KEY)
-    if raw is not None and not isinstance(raw, dict):
-        raise ValueError("cannot edit breadcrumbs config.json: catalog must be an object")
-    raw = cfg.setdefault(KEY, {})
-    raw.setdefault("entries", {})
-    raw.setdefault("links", [])
-    raw.setdefault("unlinked", [])
-    for name in ("entries",):
-        if not isinstance(raw[name], dict):
-            raise ValueError("cannot edit breadcrumbs config.json: catalog %s must be an object" % name)
-    for name in ("links", "unlinked"):
-        if not isinstance(raw[name], list):
-            raise ValueError("cannot edit breadcrumbs config.json: catalog %s must be a list" % name)
-    change(cfg, raw)
-    for name in ("links", "unlinked"):
-        raw[name] = sorted({tuple(sorted(p)) for p in raw[name] if isinstance(p, (list, tuple)) and len(p) == 2})
-        raw[name] = [list(p) for p in raw[name]]
-        if not raw[name]:
-            del raw[name]
-    dials._write_config(root, cfg)
+    with dials._editing(root):  # one editor of the file from its read to its write: no change of another is lost
+        cfg = dials._config_for_write(root)
+        raw = cfg.get(KEY)
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError("cannot edit breadcrumbs config.json: catalog must be an object")
+        raw = cfg.setdefault(KEY, {})
+        raw.setdefault("entries", {})
+        raw.setdefault("links", [])
+        raw.setdefault("unlinked", [])
+        for name in ("entries",):
+            if not isinstance(raw[name], dict):
+                raise ValueError("cannot edit breadcrumbs config.json: catalog %s must be an object" % name)
+        for name in ("links", "unlinked"):
+            if not isinstance(raw[name], list):
+                raise ValueError("cannot edit breadcrumbs config.json: catalog %s must be a list" % name)
+        change(cfg, raw)
+        for name in ("links", "unlinked"):
+            raw[name] = sorted({tuple(sorted(p)) for p in raw[name] if isinstance(p, (list, tuple)) and len(p) == 2})
+            raw[name] = [list(p) for p in raw[name]]
+            if not raw[name]:
+                del raw[name]
+        dials._write_config(root, cfg)
     return cfg
 
 

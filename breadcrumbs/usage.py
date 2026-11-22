@@ -47,7 +47,7 @@ import re
 import time
 from collections.abc import Mapping
 
-from . import costs, metrics, ports
+from . import atomic, costs, metrics, ports
 
 COUNTS = ("in", "cr", "cw", "out", "rsn")  # the token fields of a record
 PROMPT = ("in", "cr", "cw")  # the parts of the prompt
@@ -555,16 +555,21 @@ def known(home):
 def append(home, records):
     """Add a line to <home>/usage.log for each record whose request id is not there yet (nor in usage.log.1, nor before
     it in records). One write of all the lines; the file is not turned over here (the hooks of Hermes do that at their
-    next line). Returns the count of lines added."""
-    have, lines = known(home), []
-    for r in records:
-        req = word(r.get("req"))
-        if req == "-" or req in have:
-            continue
-        have.add(req)
-        lines.append(line(r) + "\n")
-    if lines:
-        os.makedirs(home, exist_ok=True)
-        with open(os.path.join(home, LOG_NAME), "ab", buffering=0) as f:
-            f.write("".join(lines).encode("utf-8"))
+    next line). Returns the count of lines added. One ingest at a time reads the ids and writes its lines (the lock of
+    the folder): two ingests of the same files that ran together each saw no id and each added every line."""
+    records = list(records)
+    if not records:
+        return 0
+    os.makedirs(home, exist_ok=True)
+    with atomic.locked(home):
+        have, lines = known(home), []
+        for r in records:
+            req = word(r.get("req"))
+            if req == "-" or req in have:
+                continue
+            have.add(req)
+            lines.append(line(r) + "\n")
+        if lines:
+            with open(os.path.join(home, LOG_NAME), "ab", buffering=0) as f:
+                f.write("".join(lines).encode("utf-8"))
     return len(lines)

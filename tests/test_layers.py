@@ -7,7 +7,8 @@ harness package imports no other harness package. A higher layer gives its part 
 of their package, so no module imports an adapter.
 
 The seven folders are seven future repositories. This test reads the folders that stand beside breadcrumbs-common (all
-seven in the monorepo, only common in a repository of its own)."""
+seven in the monorepo, only common in a repository of its own). Common is this checkout, whatever its folder is named:
+a git worktree of it has another name and no layer beside it."""
 import ast
 import os
 import unittest
@@ -30,11 +31,16 @@ RANK = {package: rank for _layer, _folder, package, rank in LAYERS}
 LAYER = {package: layer for layer, _folder, package, _rank in LAYERS}
 
 
+def folder_of(folder):
+    """The folder of a layer: this checkout for common, else the folder of that name beside it."""
+    return HERE if folder == "breadcrumbs-common" else os.path.join(ROOT, folder)
+
+
 def packages():
     """The (package, folder of the package) of every layer that is beside this folder."""
     out = []
     for _layer, folder, package, _rank in LAYERS:
-        path = os.path.join(ROOT, folder, package)
+        path = os.path.join(folder_of(folder), package)
         if os.path.isdir(path):
             out.append((package, path))
     return out
@@ -93,7 +99,7 @@ class LayerTest(unittest.TestCase):
         # a new package must be put in a layer above, or the rule below does not see it
         self.assertEqual([p for p, _ in packages()][:1], ["breadcrumbs"])
         for _layer, folder, package, _rank in LAYERS:
-            path = os.path.join(ROOT, folder)
+            path = folder_of(folder)
             if os.path.isdir(path):
                 self.assertEqual(sorted(d for d in os.listdir(path) if d.startswith("breadcrumbs")
                                         and os.path.isdir(os.path.join(path, d))), [package], folder)

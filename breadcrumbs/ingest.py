@@ -13,7 +13,7 @@ import json
 import time
 
 from .crumbs import Crumb, get_crumb, put_crumb
-from .history import _ref_name, commit
+from .history import Later, _ref_name, commit
 from .lines import get_lines, put_text, split_lines
 from .runtime import no_gc
 
@@ -286,14 +286,16 @@ def ingest_sessions(store, index, refs, sessions, message):
     t0 = time.perf_counter()
     stats = {"sessions": 0, "messages": 0, "bytes": 0}
     roots = []
+    later = Later(refs)  # the refs of the sessions wait for the store: no ref names a crumb that a crash can lose
     with no_gc():  # bulk backfill: skip the cyclic GC scans
         for sid, title, meta, rows in sessions:
-            sess = session(store, index, refs, sid, title, meta, rows, stats)
+            sess = session(store, index, later, sid, title, meta, rows, stats)
             if sess:
                 roots.append(sess)
     if roots:
         commit(store, refs, "main", roots, message)
     store.flush()
+    later.flush()
     index.commit()
     stats["seconds"] = round(time.perf_counter() - t0, 3)
     return stats

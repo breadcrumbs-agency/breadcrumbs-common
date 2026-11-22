@@ -84,7 +84,7 @@ def where(base, cwd=None, on=None, exclude=None, home=None):
 def _put(home, sessions, message):
     """The sessions into the store at `home`: (sessions, new sessions, messages, bytes). One commit on main, and only when
     a session is new or has changed; the blobs and index rows of what is there already dedupe."""
-    from .history import Refs, _ref_name, commit  # the store is opened by a sync, not by every command that imports this
+    from .history import Later, Refs, _ref_name, commit  # the store is opened by a sync, not by every command that imports this
     from .index import Index
     from .ingest import session as put_session
     from .runtime import no_gc
@@ -92,16 +92,18 @@ def _put(home, sessions, message):
     os.makedirs(home, exist_ok=True)
     store, index, refs = Store(os.path.join(home, "store")), Index(os.path.join(home, "index.db")), Refs(os.path.join(home, "refs"))
     stats, roots = {"sessions": 0, "messages": 0, "bytes": 0}, []
+    later = Later(refs)  # the refs of the sessions wait for the store (history.py): a crash leaves no ref without its crumb
     try:
         with no_gc():
             for sid, title, meta, rows in sessions:
                 before = refs.get(_ref_name("sess-", sid))
-                crumb = put_session(store, index, refs, sid, title, meta, rows, stats)
+                crumb = put_session(store, index, later, sid, title, meta, rows, stats)
                 if crumb and crumb != before:
                     roots.append(crumb)
         if roots:
             commit(store, refs, "main", roots, message)
         store.flush()
+        later.flush()  # after the commit: a sync that died before this line reads the session as new again
         index.commit()
     finally:
         index.close()
