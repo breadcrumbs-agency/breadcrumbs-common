@@ -271,5 +271,51 @@ class ScopeTest(unittest.TestCase):
             self.assertEqual(left, [])
 
 
+class LaterTest(unittest.TestCase):
+    def test_a_bulk_ingest_sets_no_session_ref_before_its_store_is_flushed(self):
+        from breadcrumbs.index import Index
+        from breadcrumbs.ingest import ingest_sessions
+
+        class Watch(Refs):
+            """Refs that note, at each set, whether the crumb is on disk for a second process."""
+            seen = []
+
+            def set(self, name, crumb_id, sync=True):
+                other = Store(os.path.join(os.path.dirname(self.path), "store"), readonly=True)
+                try:
+                    self.seen.append((name, crumb_id in other))
+                finally:
+                    other.close()
+                super().set(name, crumb_id, sync)
+
+        with tempfile.TemporaryDirectory() as home:
+            store, index = Store(os.path.join(home, "store")), Index(os.path.join(home, "index.db"))
+            refs = Watch(os.path.join(home, "refs"))
+            rows = [{"role": "user", "content": "the kettle is green", "ts": 1}, {"role": "assistant", "content": "yes", "ts": 2}]
+            ingest_sessions(store, index, refs, [("s%d" % i, "t", {}, rows) for i in range(5)], "test")
+            index.close()
+            store.close()
+        self.assertEqual(len(Watch.seen), 6)  # main, then the five sessions
+        self.assertEqual([name for name, _ in Watch.seen][0], "main")
+        self.assertEqual([on_disk for _, on_disk in Watch.seen], [True] * 6)
+
+    def test_later_gives_the_waiting_value_and_writes_at_its_flush(self):
+        from breadcrumbs.history import Later
+        with tempfile.TemporaryDirectory() as home:
+            refs = Refs(os.path.join(home, "refs"))
+            refs.set("old", "00000001")
+            later = Later(refs)
+            later.set("new", "00000002")
+            later.set("old", "00000003")
+            self.assertEqual((later.get("new"), later.get("old"), later.get("none")), ("00000002", "00000003", None))
+            self.assertEqual((refs.get("new"), refs.get("old")), (None, "00000001"))  # nothing is written yet
+            self.assertEqual(later.names(), ["new", "old"])
+            with self.assertRaises(ValueError):
+                later.set("bad/name", "00000004")
+            later.flush()
+            self.assertEqual((refs.get("new"), refs.get("old")), ("00000002", "00000003"))
+            later.flush()  # a second flush has nothing to write
+
+
 if __name__ == "__main__":
     unittest.main()

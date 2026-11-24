@@ -8,8 +8,17 @@ Files in the store directory:
               header "<2sBBIII": b"BC", codec, 0, raw_len, comp_len, crc32c(payload)
   blobs.idx   append-only 24-byte records "<IHHQII":
               crc, ordinal, flags, block_offset, offset_in_block, length
-A block is written before its index records, so the index never points at
-missing bytes. Every read checks the block CRC and the blob CRC.
+A block is written before its index records, so after the crash of a writer the
+index never points at missing bytes. Every read checks the block CRC and the blob CRC.
+
+A power loss is another case: the system can keep the index records and lose the block
+that they name (each file reaches the disk in its own time). A put of the same bytes
+then found the record, could not read its block, and failed, for every lost line. So a
+writer that opens the store checks the last block that the index names, and cuts the
+index records of a lost tail (kept in blobs.idx.lost); the lost blobs can then be put
+again. It cuts a tail only: damage before a good block is left for `doctor`. sync() is
+a flush whose bytes are on the device when it returns, the pack first: a head is set
+after it (history.commit), so no head names a commit that a power loss can take.
 
 The open index makes no Python object per blob. Row p is item p of four arrays: crc, block,
 offset, length (16 bytes; the block array widens to 8 bytes when a block starts past 4 GiB).
@@ -59,6 +68,8 @@ _REC = struct.Struct("<IHHQII")
 _SLOTS = 1024  # first size of the slot table (a power of 2)
 _READ = 1024 * _REC.size  # index bytes per read: a small buffer does not stay in RSS after use
 _BIG_ENDIAN = sys.byteorder == "big"  # the files are little-endian
+_CHECK_MAX = 256 * 1024  # the largest last block that a writer checks whole when it opens the store (_whole_block)
+_CHECK_END = 4096  # of a larger one: its last bytes
 
 
 class StoreBusy(OSError):
@@ -118,6 +129,26 @@ def _compress(raw, codec):
     return (codec, comp) if len(comp) < len(raw) else (RAW, raw)
 
 
+def _whole_block(pack, block, pack_size):
+    """True when the block at offset `block` of the open pack file is whole: its header, its length inside the file,
+    and the CRC32C of its compressed bytes. It does not decompress, so a codec that this runtime lacks is no fault.
+    A block over _CHECK_MAX bytes (one big blob) is not read whole: every open of a writer would pay for it (the
+    pure-Python CRC32C reads about 3 MB in a second). Its length is checked, and its last bytes: pages that never
+    reached the disk read as zero bytes, and no compressed block ends in a run of them. A read checks its CRC."""
+    if block + _HDR.size > pack_size:
+        return False
+    pack.seek(block)
+    magic, codec, _r, _raw_len, comp_len, crc = _HDR.unpack(pack.read(_HDR.size))
+    if magic != b"BC" or block + _HDR.size + comp_len > pack_size:
+        return False
+    if comp_len <= _CHECK_MAX:
+        return crc32c(pack.read(comp_len)) == crc
+    if codec == RAW:  # bytes that did not compress may end in anything
+        return True
+    pack.seek(block + _HDR.size + comp_len - _CHECK_END)
+    return any(pack.read(_CHECK_END))
+
+
 def _decompress(comp, codec):
     if codec == RAW:
         return comp
@@ -160,10 +191,12 @@ class Store:
         self._pack = self._idx = self._lockf = None
         self._src_path = os.path.join(path, "sources")
         self._src, self._src_size, self._src_pending = {}, 0, {}
+        self.cut = 0
         if not readonly:
             self._pack = open(os.path.join(path, "blobs.pack"), "ab")
             self._idx = open(self._idx_path, "ab")
             self._lockf = open(os.path.join(path, "lock"), "ab")
+            self.cut = self._cut_lost_tail()  # the index records that this open cut (0 in a whole store)
         self._reader = open(os.path.join(path, "blobs.pack"), "rb")
         with no_gc():  # a big load makes many short-lived tuples: skip the cyclic GC scans
             self._catch_up()
@@ -327,6 +360,36 @@ class Store:
         finally:
             fcntl.flock(self._lockf, fcntl.LOCK_UN)
 
+    def _cut_lost_tail(self):
+        """Cut the index records at the end of blobs.idx whose block is not whole in blobs.pack (see the module doc).
+        Returns the count of records cut. Under the lock no live writer is between its block and its records, so a
+        record that names bytes past the end of the pack, or a block that fails its CRC, is of a writer that is gone.
+        The cut bytes are appended to blobs.idx.lost first."""
+        pack_path = os.path.join(self.path, "blobs.pack")
+        with self._locked():
+            size = os.path.getsize(self._idx_path)
+            whole = keep = size - size % _REC.size
+            pack_size, good = os.path.getsize(pack_path), {}
+            with open(self._idx_path, "rb") as idx, open(pack_path, "rb") as pack:
+                while keep:
+                    idx.seek(keep - _REC.size)
+                    block = _REC.unpack(idx.read(_REC.size))[3]
+                    if block not in good:
+                        good[block] = _whole_block(pack, block, pack_size)
+                    if good[block]:
+                        break
+                    keep -= _REC.size
+                if keep == whole:
+                    return 0
+                idx.seek(keep)
+                lost = idx.read(whole - keep)
+            with open(self._idx_path + ".lost", "ab") as f:
+                f.write(lost)
+                f.flush()
+                os.fsync(f.fileno())
+            os.truncate(self._idx_path, keep)
+        return len(lost) // _REC.size
+
     def _resolve_clashes(self):
         """Another writer stored a blob under the id of one of ours: the same bytes share it;
         different bytes (a CRC32C collision across writers) must never share one id."""
@@ -447,11 +510,19 @@ class Store:
             if doc not in self._src_pending:
                 self._src[doc] = loc
 
-    def flush(self):
+    def sync(self):
+        """flush(), and the bytes are on the device when it returns (the pack before the index that names it). For a
+        write that a head will name: history.commit calls it before it sets its ref."""
+        self.flush(sync=True)
+
+    def flush(self, sync=False):
         if not self._buf:
             if self._src_pending:
                 with self._locked():
                     self._write_sources()
+            if sync and self._pack is not None:  # blocks of earlier flushes may still be on their way
+                os.fsync(self._pack.fileno())
+                os.fsync(self._idx.fileno())
             return
         raw = bytes(self._buf)
         codec, comp = _compress(raw, self.codec)
@@ -462,6 +533,8 @@ class Store:
             self._pack.write(_HDR.pack(b"BC", codec, 0, len(raw), len(comp), crc32c(comp)))
             self._pack.write(comp)
             self._pack.flush()
+            if sync:
+                os.fsync(self._pack.fileno())
             recs = bytearray()
             for p, ordinal in self._pending.items():  # a shared copy left _pending in _resolve_clashes
                 self._set_block(p, block)
@@ -471,6 +544,8 @@ class Store:
                 os.truncate(self._idx_path, end - end % _REC.size)
             self._idx.write(recs)
             self._idx.flush()
+            if sync:
+                os.fsync(self._idx.fileno())
             self._idx_size = os.path.getsize(self._idx_path)
             self._write_sources()
         self._buf.clear()
