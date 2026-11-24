@@ -30,7 +30,7 @@ import json
 import re
 
 from .crumbs import Crumb, is_crumb
-from .ingest import memory_row
+from .ingest import memory_row, title_of
 from .lines import doc_lines
 from .store import format_id
 
@@ -279,7 +279,8 @@ class Zoom:
         return out
 
     def _head(self, blob_id, crumb, depth, title, full=None):
-        label = " " + json.dumps(crumb.title[:40], ensure_ascii=False) if title and crumb.title else ""
+        shown = title_of(self.store, crumb) if title else ""
+        label = " " + json.dumps(shown[:40], ensure_ascii=False) if shown else ""
         cue = self.cue_words(blob_id) if title and crumb.kind in CUED else ""
         # an opened crumb that came from IPFS names its source CID (a handle in a list stays short)
         src = " \u21d0 " + crumb.meta["cid"] if not title and crumb.meta.get("cid") else ""

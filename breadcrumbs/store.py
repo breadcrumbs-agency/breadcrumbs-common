@@ -25,6 +25,10 @@ crashed writer is cut off. Without fcntl (Windows) use one writer per store.
   sources     append-only lines "<doc id> <locator>\n": the texts whose bytes a harness keeps (lines.put_text with
               a locator). Such a text has its spine here and no line blob; it is read from the harness. A later
               line for the same doc wins. Written at flush, under the lock, after the block that holds the spine.
+  format      "2": the store keeps no copy of a text that a harness keeps. A new store gets it; a store with blobs
+              and no "format" is from a release that copied every text (old(); lines.relocate converts it).
+  open        a Store holds a shared lock on it while it is open (each process, each instance): lines.relocate
+              takes it exclusive, so a store that is open anywhere is never rewritten (StoreBusy).
 """
 
 import contextlib
@@ -55,6 +59,42 @@ _REC = struct.Struct("<IHHQII")
 _SLOTS = 1024  # first size of the slot table (a power of 2)
 _READ = 1024 * _REC.size  # index bytes per read: a small buffer does not stay in RSS after use
 _BIG_ENDIAN = sys.byteorder == "big"  # the files are little-endian
+
+
+class StoreBusy(OSError):
+    """The store is open in another Store (another process, a viewer), or being converted."""
+
+
+FORMAT = "2"
+
+
+def old(path):
+    """True for a store that a release before locators wrote: blobs, and no file "format"."""
+    pack = os.path.join(path, "blobs.pack")
+    return os.path.isfile(pack) and os.path.getsize(pack) > 0 and not os.path.exists(os.path.join(path, "format"))
+
+
+def set_format(path):
+    with open(os.path.join(path, "format"), "w", encoding="utf-8") as f:
+        f.write(FORMAT + "\n")
+
+
+def hold(path, exclusive=False, readonly=False):
+    """The open file of path/open with a lock on it: shared (an open Store) or exclusive (a rewrite); StoreBusy when
+    another holder conflicts. None without fcntl, and for a read-only store without the file (it makes none)."""
+    if fcntl is None:
+        return None
+    name = os.path.join(path, "open")
+    try:
+        f = open(name, "rb" if readonly else "ab")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(f, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        raise StoreBusy("the store %s is %s" % (path, "open elsewhere" if exclusive else "being converted"))
+    return f
 
 
 def parse_id(blob_id):
@@ -89,13 +129,17 @@ def _decompress(comp, codec):
 
 
 class Store:
-    def __init__(self, path, codec=ZLIB, cache_blocks=32, readonly=False):
-        """readonly: open an existing store to read; create and change no file, refuse puts."""
+    def __init__(self, path, codec=ZLIB, cache_blocks=32, readonly=False, shared=True):
+        """readonly: open an existing store to read; create and change no file, refuse puts. shared=False: hold no
+        lock on "open" (lines.relocate, which holds it exclusive)."""
         if readonly:
             if not os.path.isdir(path):
                 raise FileNotFoundError(path)
         else:
             os.makedirs(path, exist_ok=True)
+            if not os.path.exists(os.path.join(path, "blobs.pack")) and not os.path.exists(os.path.join(path, "format")):
+                set_format(path)  # a new store
+        self._held = hold(path, readonly=readonly) if shared else None
         self.path, self.readonly = path, readonly
         self.codec = codec
         self._crc = array("I")  # the index: one item per row (see the module doc)
@@ -445,9 +489,10 @@ class Store:
 
     def close(self):
         self.flush()
-        for f in (self._pack, self._idx, self._reader, self._lockf):
+        for f in (self._pack, self._idx, self._reader, self._lockf, self._held):
             if f is not None:
                 f.close()
+        self._held = None
 
     def __enter__(self):
         return self

@@ -10,6 +10,7 @@ ports.harness, source).
 """
 
 import json
+import re
 import time
 
 from .crumbs import Crumb, get_crumb, put_crumb
@@ -25,6 +26,34 @@ def first_line(text):
     return ""
 
 
+_MORE = re.compile(r" \(\+\d+\)$")
+
+
+def title_of(store, crumb):
+    """The title that a view shows. The store keeps no words of a text that a harness keeps: the title of its crumb
+    (its role, or the first line that a release before copied) is not shown; the view shows the role and the first
+    line as the harness gives it now (masked). A span over such turns shows that title (+n), and a session whose
+    title came from its first turn shows it too."""
+    leaf, seen = crumb, 0
+    while leaf.kids and not leaf.ranges and seen < 8:
+        leaf, seen = get_crumb(store, leaf.kids[0]), seen + 1
+    role = leaf.meta.get("role")
+    loc = getattr(store, "locator", None)
+    if not (leaf.ranges and role and loc and loc(leaf.ranges[0][0])):
+        return crumb.title
+    doc, a, b = leaf.ranges[0][:3]
+    head = first_line(b"".join(get_lines(store, doc, a, min(b, a + 8))).decode("utf-8", "replace"))
+    shown = ("%s: %s" % (role, head))[:60]
+    if crumb is leaf:
+        return shown
+    more = _MORE.search(crumb.title)
+    if crumb.kind == "span" and more:
+        return shown[:48] + more.group(0)
+    if not crumb.title or crumb.title in (leaf.title, role):
+        return shown
+    return crumb.title
+
+
 def put_turn(store, index, role, text, session, ts=None, public=False, extra=None, kind="turn", prev=None, loc=None):
     """Store one message text as a turn crumb; index it when an index is given. loc: where a harness keeps this exact
     text (lines.put_text): the store then keeps no copy of it.
@@ -38,10 +67,10 @@ def put_turn(store, index, role, text, session, ts=None, public=False, extra=Non
     meta = {"role": role, "sess": session, "ts": int(time.time() if ts is None else ts)}
     if extra:
         meta.update(extra)
-    title = ("%s: %s" % (role, first_line(text)))[:60]
+    title = role if loc else ("%s: %s" % (role, first_line(text)))[:60]  # a harness's text: title(store, crumb)
     cid = put_crumb(store, Crumb(kind, title, ranges=[[doc, 0, n]], public=public, meta=meta))
     if index is not None:
-        index.add(cid, "%s:0-%d" % (doc, n), text, kind=kind, public=public)
+        index.add(cid, "%s:0-%d" % (doc, n), text, kind=kind, public=public, loc=loc)
         if prev and get_crumb(store, prev).meta.get("role") != role:
             index.link(prev, cid)
     return cid
@@ -284,7 +313,10 @@ def session(store, index, refs, sid, title, meta, rows, stats):
     turns, _ = put_rows(store, index, rows, sid)
     if not turns:
         return None
-    sess = put_tree(store, "sess", title or get_crumb(store, turns[0]).title, turns, meta=dict(meta or {}, sess=sid))
+    first = get_crumb(store, turns[0])
+    if not title and not (first.ranges and store.locator(first.ranges[0][0])):
+        title = first.title  # a harness's text gives the store no title: title_of reads it
+    sess = put_tree(store, "sess", title or "", turns, meta=dict(meta or {}, sess=sid))
     refs.set(_ref_name("sess-", sid), sess)
     stats["sessions"] += 1
     return sess

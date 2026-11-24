@@ -5,6 +5,11 @@ from it at any time. Each row is one range of one crumb, so every hit names
 its exact source: (crumb id, "doc:a-b"). The FTS5 table is contentless: the
 text lives once, in the store, not again in the index.
 
+A row whose text a harness keeps (a locator, lines.put_text) has no FTS5 entry: its
+words are in the harness's own index. search() asks each port "find:<harness>" and maps
+the locators it gives to rows; the counts of the cue words and the zoom add each port
+"vocab:<harness>" (ports.py).
+
 One table is not derived: `heat` (id, last access time, uses) records which crumbs the
 model opened. A rebuild of the index must keep it. `sums` (source -> summary) is derived:
 the "sum" crumbs name their source in their heritage.
@@ -58,6 +63,13 @@ def g2(a, b, c, d):
     return 2 * g if a * (b + d) > b * (a + c) else -2 * g
 
 
+class _Folder:
+    """The store of a breadcrumbs folder as the port source:<harness> takes it (it reads only its path)."""
+
+    def __init__(self, root):
+        self.path = os.path.join(root, "store")
+
+
 def cue_edges(nodes, per_node=4):
     """Edges between nodes that share cue words; weight = Jaccard; at most per_node edges each."""
     sets = [{w.lower() for w in n["cues"]} for n in nodes]
@@ -92,6 +104,9 @@ class Index:
             self.db.execute("CREATE TABLE IF NOT EXISTS rows (id INTEGER PRIMARY KEY, crumb TEXT, ref TEXT,"
                             " kind TEXT, public INTEGER, UNIQUE (crumb, ref))")
             self.db.execute("CREATE INDEX IF NOT EXISTS rows_ref ON rows (ref)")  # holder(): the crumb of a text
+            if "loc" not in [c[1] for c in self.db.execute("PRAGMA table_info(rows)")]:
+                self.db.execute("ALTER TABLE rows ADD COLUMN loc TEXT")  # where a harness keeps the text: no FTS5 entry
+            self.db.execute("CREATE INDEX IF NOT EXISTS rows_loc ON rows (loc) WHERE loc IS NOT NULL")
             self.db.execute("CREATE TABLE IF NOT EXISTS heat (id TEXT PRIMARY KEY, accessed INTEGER, uses INTEGER)")
             # Dialogue neighbors, stored both ways, so one primary-key lookup finds prev and next.
             self.db.execute("CREATE TABLE IF NOT EXISTS nbr (a TEXT, b TEXT, PRIMARY KEY (a, b)) WITHOUT ROWID")
@@ -110,6 +125,12 @@ class Index:
         # each word's stems (the tokenizer never changes) and each stem's (docs, count) in the index,
         # which _fresh() clears when the index changes.
         self._stem_of, self._vocab, self._seen = {}, {}, None
+        self.root = os.path.dirname(os.path.abspath(path))  # the store's folder: what the ports of a harness take
+        # an index of a release before 0.6.0 opened read-only has no column loc: then no row points at a harness
+        self._loc = "loc" in [c[1] for c in self.db.execute("PRAGMA table_info(rows)")]
+        self.db.execute("SELECT rowid FROM t LIMIT 0").fetchall()  # the FTS5 table connects here, not under a deadline
+        # (hive.search: an interrupt inside its constructor would read "vtable constructor failed", not "interrupted")
+        self._outside = None  # [count(stem)] of the harnesses, see _totals()
 
     def signature(self, text, k=8):
         """Up to k cue words of a text: the words it uses more than the rest of the index.
@@ -144,13 +165,23 @@ class Index:
         return [form[words[i]] for i in sorted(i for _, i in sorted(scored)[:k])]
 
     def _totals(self):
-        """(rows, tokens, terms) of the whole index; read again when the index grows by more than 1%."""
+        """(rows, tokens, terms) of the whole index and of the harnesses' texts (vocab:<harness>); read again when
+        the index grows by more than 1%."""
         db = self.db
         db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.vocab USING fts5vocab('main', 't', 'row')")
         rows = db.execute("SELECT max(id) FROM rows").fetchone()[0] or 0
         if self._tokens is None or rows > 1.01 * self._tokens[0]:
             tokens, terms = db.execute("SELECT sum(cnt), count(*) FROM temp.vocab").fetchone()
-            self._tokens = (rows, tokens or 0, terms or 0)
+            own = db.execute("SELECT count(*) FROM rows" + (" WHERE loc IS NULL" if self._loc else "")).fetchone()[0]
+            tokens, terms, self._outside = tokens or 0, terms or 0, []
+            from . import ports
+            for _name, vocab in ports.given("vocab:"):
+                got = vocab(self.root, self._stems)
+                if got:
+                    n, t, v, count = got
+                    own, tokens, terms = own + n, tokens + t, terms + v
+                    self._outside.append(count)
+            self._tokens = (max(rows, own), tokens, terms)
         return self._tokens
 
     def _fresh(self):
@@ -162,11 +193,16 @@ class Index:
             self._seen, self._vocab = seen, {}
 
     def _count(self, stem):
-        """(rows that hold the stem, its count) in the index. Call _fresh() first."""
+        """(rows that hold the stem, its count) in the index and the harnesses' texts. Call _fresh() first."""
         hit = self._vocab.get(stem)
         if hit is None:
-            hit = self._vocab[stem] = self.db.execute("SELECT doc, cnt FROM temp.vocab WHERE term = ?",
-                                                      (stem,)).fetchone() or (0, 0)
+            docs, cnt = self.db.execute("SELECT doc, cnt FROM temp.vocab WHERE term = ?", (stem,)).fetchone() or (0, 0)
+            if self._outside is None:
+                self._totals()
+            for count in self._outside:
+                d, c = count(stem)
+                docs, cnt = docs + d, cnt + c
+            hit = self._vocab[stem] = (docs, cnt)
         return hit
 
     def _word_stems(self, words):
@@ -276,23 +312,44 @@ class Index:
         rows = self.db.execute("SELECT id, accessed, uses FROM heat WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
         return {i: (a, u) for i, a, u in rows}
 
-    def add(self, crumb, ref, text, kind="", public=False):
-        """Index one range of one crumb. Returns False if it is already there."""
+    def add(self, crumb, ref, text, kind="", public=False, loc=None):
+        """Index one range of one crumb. Returns False if it is already there. loc: where a harness keeps the text;
+        its words are then in the harness's index, not here."""
         try:
-            cur = self.db.execute("INSERT INTO rows (crumb, ref, kind, public) VALUES (?, ?, ?, ?)",
-                                  (crumb, ref, kind, 1 if public else 0))
+            cur = self.db.execute("INSERT INTO rows (crumb, ref, kind, public, loc) VALUES (?, ?, ?, ?, ?)",
+                                  (crumb, ref, kind, 1 if public else 0, loc))
         except sqlite3.IntegrityError:
             return False
-        self.db.execute("INSERT INTO t (rowid, text) VALUES (?, ?)", (cur.lastrowid, text))
+        if loc is None:
+            self.db.execute("INSERT INTO t (rowid, text) VALUES (?, ?)", (cur.lastrowid, text))
         return True
+
+    def relocate(self, located, text_of):
+        """After lines.relocate: the rows of the texts in located ({doc: locator}) get their locator, and the FTS5
+        table is built again from the other rows (text_of(ref) -> their text). Returns the rows located."""
+        n = 0
+        for rid, ref in self.db.execute("SELECT id, ref FROM rows WHERE loc IS NULL").fetchall():
+            loc = located.get(ref.partition(":")[0])
+            if loc is not None:
+                self.db.execute("UPDATE rows SET loc = ? WHERE id = ?", (loc, rid))
+                n += 1
+        self.db.execute("INSERT INTO t (t) VALUES ('delete-all')")
+        for rid, ref in self.db.execute("SELECT id, ref FROM rows WHERE loc IS NULL").fetchall():
+            self.db.execute("INSERT INTO t (rowid, text) VALUES (?, ?)", (rid, text_of(ref)))
+        self.db.commit()
+        self.db.execute("VACUUM")
+        self._tokens, self._outside = None, None
+        return n
 
     def drop(self, crumb, text_of):
         """Remove a crumb from the index: its rows and its neighbor links; its neighbors are linked to
         each other, so the chain skips it. text_of(ref) gives the text that a row indexed (a contentless
         FTS5 table removes a row only with its text). Returns the number of rows removed."""
-        rows = self.db.execute("SELECT id, ref FROM rows WHERE crumb = ?", (crumb,)).fetchall()
-        for rid, ref in rows:
-            self.db.execute("INSERT INTO t (t, rowid, text) VALUES ('delete', ?, ?)", (rid, text_of(ref)))
+        rows = self.db.execute("SELECT id, ref, %s FROM rows WHERE crumb = ?" % ("loc" if self._loc else "NULL"),
+                               (crumb,)).fetchall()
+        for rid, ref, loc in rows:
+            if loc is None:
+                self.db.execute("INSERT INTO t (t, rowid, text) VALUES ('delete', ?, ?)", (rid, text_of(ref)))
             self.db.execute("DELETE FROM rows WHERE id = ?", (rid,))
         near = [b for (b,) in self.db.execute("SELECT b FROM nbr WHERE a = ?", (crumb,)).fetchall()]
         self.db.execute("DELETE FROM nbr WHERE a = ? OR b = ?", (crumb, crumb))
@@ -318,7 +375,17 @@ class Index:
         pub = " AND r.public = 1" if public_only else ""
         sql = ("SELECT r.crumb, r.ref, bm25(t) AS s FROM t JOIN rows r ON r.id = t.rowid WHERE t MATCH ?"
                + pub + " ORDER BY s LIMIT ?")
-        hits = [(c, r, -s) for c, r, s in self.db.execute(sql, (query, k if nb <= 0 else max(3 * k, 50)))]
+        want = k if nb <= 0 else max(3 * k, 50)
+        hits = [(c, r, -s, None) for c, r, s in self.db.execute(sql, (query, want))]
+        stems = []
+        hits = sorted(hits + self._outside_hits(query, want, pub, stems), key=lambda h: -h[2])
+        kept = []
+        for c, r, s, loc in hits:  # best first: a harness's text is read only until want hits are kept
+            if loc is None or self._shows(loc, stems):
+                kept.append((c, r, s))
+                if len(kept) == want:
+                    break
+        hits = kept
         if nb <= 0:
             return hits
         ref, score = {}, {}
@@ -339,6 +406,45 @@ class Index:
         order = ids + [c for c in new if c in ref]
         final = {c: score.get(c, 0.0) + nb * near.get(c, 0.0) for c in order}
         return [(c, ref[c], final[c]) for c in sorted(order, key=lambda c: -final[c])[:k]]
+
+    def _shows(self, loc, stems):
+        """True when the text at loc, as the harness gives it to show (masked: source:<harness>), holds a word that
+        starts with one of stems. A harness's index may hold the text as typed: a hit on a word that the view masks (a
+        piece of a key) would confirm the key; it is not a hit."""
+        from . import ports
+        source = ports.get("source:" + loc.partition(":")[0])
+        got = source(_Folder(self.root), loc) if source is not None else None
+        if not got:
+            return False
+        shown = got[1] if isinstance(got, tuple) else got
+        if isinstance(shown, bytes):
+            shown = shown.decode("utf-8", "replace")
+        return any(w.startswith(s) for w in set(re.findall(r"\w+", shown.lower())) for s in stems)
+
+    def _outside_hits(self, query, k, pub, stems):
+        """[(crumb, ref, score, locator)] of the rows that the harnesses' own searches find (find:<harness>); stems
+        gets the stems that it asked for."""
+        from . import ports
+        out = []
+        finders = ports.given("find:")
+        if not self._loc or not finders:
+            return out
+        # a harness's index has its own tokenizer: each porter stem of the words goes as a prefix ("relocat"* finds
+        # relocate, relocated, relocation, as the stems of this index do)
+        words = [w.strip('"') for w in query.split(" OR ")]
+        stems[:] = dict.fromkeys(stem for stem, _i in self._stems(words))
+        query = " OR ".join('"%s"*' % s for s in stems)
+        if not query:
+            return out
+        for _name, find in finders:
+            got = dict(find(self.root, query, k) or ())
+            locs = list(got)
+            for i in range(0, len(locs), 500):
+                part = locs[i:i + 500]
+                for c, r, loc in self.db.execute("SELECT r.crumb, r.ref, r.loc FROM rows r WHERE r.loc IN (%s)%s"
+                                                 % (",".join("?" * len(part)), pub), part).fetchall():
+                    out.append((c, r, got[loc], loc))
+        return out
 
     def commit(self):
         self.db.commit()

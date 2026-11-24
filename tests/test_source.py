@@ -8,7 +8,10 @@ import unittest
 
 from breadcrumbs import ports
 from breadcrumbs.lines import SOURCE_GONE, get_lines, get_text, masked_lines, put_text, relocate, split_lines
-from breadcrumbs.store import Store
+from breadcrumbs.crumbs import Crumb, get_crumb, put_crumb
+from breadcrumbs.index import Index
+from breadcrumbs.ingest import put_rows, put_tree, title_of
+from breadcrumbs.store import Store, StoreBusy, old
 
 KEY = "sk-proj-" + "Q7f2" * 12
 
@@ -91,7 +94,9 @@ class RelocateTest(unittest.TestCase):
             texts = [("test:1", (b"the harness keeps this\nline two\n",)),
                      ("test:2", (("key %s\n" % KEY).encode(), lambda: ("key %s\n" % scrub(KEY)).encode())),
                      ("test:3", (b"a row this store never held\n",))]
-            self.assertEqual(relocate(path, texts), 2)  # two lines only the located texts used
+            located, dropped = relocate(path, texts)
+            self.assertEqual((dropped, set(located.values())), (2, {"test:1", "test:2"}))  # lines only they used
+            self.assertFalse(old(path))
             store = Store(path)
             try:
                 self.assertEqual(len(ids) - len(set(store.ids())), 2)
@@ -101,6 +106,89 @@ class RelocateTest(unittest.TestCase):
                 self.assertEqual(get_text(store, own), b"a summary only this store holds\nline two\n")
             finally:
                 store.close()
+
+    def test_a_store_open_anywhere_is_not_converted_and_none_opens_while_it_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "store")
+            store = Store(path)
+            put_text(store, b"x\n")
+            store.flush()
+            with self.assertRaises(StoreBusy):
+                relocate(path, [])
+            store.close()
+            relocate(path, [])
+            Store(path).close()
+
+    def test_old_is_a_store_with_blobs_and_no_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "store")
+            store = Store(path)
+            put_text(store, b"x\n")
+            store.close()
+            self.assertFalse(old(path))  # a new store has its format
+            os.remove(os.path.join(path, "format"))  # as a release before wrote it
+            self.assertTrue(old(path))
+            relocate(path, [])
+            self.assertFalse(old(path))
+
+
+class OutsideTest(unittest.TestCase):
+    """A text that a harness keeps leaves no words in the index or in a title: the harness's own search and counts
+    stand in (find:<harness>, vocab:<harness>), and a view reads the title from the harness."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(os.path.join(self.tmp.name, "store"))
+        self.addCleanup(self.store.close)
+        self.index = Index(os.path.join(self.tmp.name, "index.db"))
+        self.addCleanup(self.index.close)
+        self.rows = {"test:1": b"where is the kettle\n", "test:2": b"on the top shelf\n"}
+        for name, port in (("source:test", lambda store, loc: (self.rows[loc], self.rows[loc], None)
+                            if loc in self.rows else None),
+                           ("find:test", lambda root, query, k: [(loc, 2.5) for loc, t in self.rows.items()
+                                                                 if b"kettle" in t and '"kettl"*' in query]),
+                           ("vocab:test", lambda root, stems: (2, 7, 6, lambda stem: (1, 1) if stem == "kettl" else (0, 0)))):
+            saved = ports.get(name)
+            self.addCleanup(ports.give, name, saved)
+            ports.give(name, port)
+        turns, _ = put_rows(self.store, self.index, [
+            {"role": "user", "content": "where is the kettle\n", "loc": "test:1"},
+            {"role": "assistant", "content": "on the top shelf\n", "loc": "test:2"},
+            {"role": "user", "content": "a note of this store only, kettle too"}], "s1")
+        self.turns = turns
+
+    def test_no_word_of_a_harness_text_is_in_the_index_or_its_title(self):
+        self.index.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.v USING fts5vocab('main', 't', 'row')")
+        terms = {t for (t,) in self.index.db.execute("SELECT term FROM temp.v")}
+        self.assertNotIn("shelf", terms)
+        self.assertIn("note", terms)
+        self.assertEqual(get_crumb(self.store, self.turns[0]).title, "user")
+
+    def test_search_finds_both_and_counts_add_the_harness(self):
+        found = [c for c, _r, _s in self.index.search("kettle")]
+        self.assertEqual(set(found), {self.turns[0], self.turns[2]})
+        self.index._fresh()
+        self.assertEqual(self.index._count("kettl"), (2, 2))
+
+    def test_a_view_shows_the_title_from_the_harness(self):
+        self.assertEqual(title_of(self.store, get_crumb(self.store, self.turns[0])), "user: where is the kettle")
+        sess = get_crumb(self.store, put_tree(self.store, "sess", "", self.turns))
+        self.assertEqual(title_of(self.store, sess), "user: where is the kettle")
+        self.assertEqual(title_of(self.store, get_crumb(self.store, self.turns[2])),
+                         "user: a note of this store only, kettle too")
+
+    def test_index_relocate_drops_the_words_of_located_texts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Index(os.path.join(tmp, "index.db"))
+            try:
+                index.add("c1", "d1:0-1", "copied shelf words")
+                index.add("c2", "d2:0-1", "summary words")
+                self.assertEqual(index.relocate({"d1": "test:9"}, lambda ref: "summary words"), 1)
+                self.assertEqual([c for c, _r, _s in index.search("shelf")], [])
+                self.assertEqual([c for c, _r, _s in index.search("summary")], ["c2"])
+            finally:
+                index.close()
 
 
 if __name__ == "__main__":

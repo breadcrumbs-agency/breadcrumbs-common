@@ -182,59 +182,67 @@ def get_text(store, doc_id):
 
 
 def relocate(path, texts):
-    """Turn the copies in the store at path into locators, once: texts yields (loc, candidates), the bytes that a
-    store may hold for the text at loc (a harness's own text and its masked form), each a callable or bytes. A
-    document with those bytes gets the locator, and the line blobs that only such documents use are dropped: the store
-    is written again without them (every other blob keeps its id), under its lock. Returns the blobs dropped."""
+    """Convert an old store (store.old) at path, once: texts yields (loc, candidates), the bytes that the store may
+    hold for the text at loc (a harness's own text and its masked form), each a callable or bytes. A document with
+    those bytes gets the locator, and the line blobs that only such documents use are dropped: the store is written
+    again without them (every other blob keeps its id), and gets its "format". StoreBusy when the store is open
+    anywhere (it holds the lock on "open" exclusive while it runs). Returns {doc: locator} of the store's texts that
+    a harness keeps, and the blobs dropped."""
     import shutil
-    from .store import Store
-    store = Store(path)
+    from .store import Store, hold, set_format
+    held = hold(path, exclusive=True)
     try:
-        located = store.located()
-        for loc, cands in texts:
-            for data in cands:
-                data = data() if callable(data) else data
-                doc = doc_of(store, data) if data else None
-                if doc is not None:
-                    if doc not in located:
-                        store.refer(doc, loc)
-                        located[doc] = loc
-                    break
-        store.flush()
-        keep, only = set(), set()
-        for bid in store.ids():
-            blob = store.get(bid)
-            if blob[:4] == b"SP01":
-                (only if bid in located else keep).update(format_id(c, o) for c, o in decode_spine(blob))
-        drop = only - keep - set(located)
-        for bid in list(drop):  # a kept blob with ordinal k keeps its id only when ordinals 0..k-1 are there too
-            crc, o = parse_id(bid)
-            while format_id(crc, o + 1) in store:
-                o += 1
-                if format_id(crc, o) not in drop:
-                    drop.discard(bid)
-                    break
-        if not drop:
-            return 0
-        new = path + ".new"
-        shutil.rmtree(new, ignore_errors=True)
-        os.makedirs(new)
-        with store._locked():
-            out = Store(new)
-            try:
-                for bid in store.ids():
-                    if bid not in drop:
-                        got = out.put(store.get(bid))
-                        assert got == bid, (bid, got)
-                for doc, loc in located.items():
-                    out.refer(doc, loc)
-                out.flush()
-            finally:
-                out.close()
+        store = Store(path, shared=False)
+        try:
+            located = store.located()
+            for loc, cands in texts:
+                for data in cands:
+                    data = data() if callable(data) else data
+                    doc = doc_of(store, data) if data else None
+                    if doc is not None:
+                        if doc not in located:
+                            store.refer(doc, loc)
+                            located[doc] = loc
+                        break
+            store.flush()
+            keep, only = set(), set()
+            for bid in store.ids():
+                blob = store.get(bid)
+                if blob[:4] == b"SP01":
+                    (only if bid in located else keep).update(format_id(c, o) for c, o in decode_spine(blob))
+            drop = only - keep - set(located)
+            for bid in list(drop):  # a kept blob with ordinal k keeps its id only when ordinals 0..k-1 are there too
+                crc, o = parse_id(bid)
+                while format_id(crc, o + 1) in store:
+                    o += 1
+                    if format_id(crc, o) not in drop:
+                        drop.discard(bid)
+                        break
+            if drop:
+                new = path + ".new"
+                shutil.rmtree(new, ignore_errors=True)
+                out = Store(new, shared=False)
+                try:
+                    for bid in store.ids():
+                        if bid not in drop:
+                            got = out.put(store.get(bid))
+                            assert got == bid, (bid, got)
+                    for doc, loc in located.items():
+                        out.refer(doc, loc)
+                    out.flush()
+                finally:
+                    out.close()
+                if held is not None:  # the lock moves with the store: an open waits for the end of the rename
+                    os.replace(os.path.join(path, "open"), os.path.join(new, "open"))
+        finally:
+            store.close()
+        if drop:
             old = path + ".old"
             os.rename(path, old)
             os.rename(new, path)
-        shutil.rmtree(old, ignore_errors=True)
-        return len(drop)
+            shutil.rmtree(old, ignore_errors=True)
+        set_format(path)
+        return located, len(drop)
     finally:
-        store.close()
+        if held is not None:
+            held.close()
