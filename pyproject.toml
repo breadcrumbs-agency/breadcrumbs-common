@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "breadcrumbs-common"
-version = "0.4.1"
+version = "0.5.0"
 description = "Content-addressed breadcrumb memory: the store, the verbs, the servers (MCP, socket, A2A) and the command line."
 requires-python = ">=3.11"
 license = "MIT"

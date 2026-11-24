@@ -37,6 +37,14 @@ The ports, each a function (the adapter of hermes gives them; the adapter of spa
     settings(root, action, payload)  optional harness-specific settings CRUD for the common explorer widget
     groups(root, action, payload)  the groups of profiles of the harness's root (get, create, rename, delete, add,
                                remove, note); the answer lists the groups and the profiles in none, or None
+    source:<harness>(store, loc)  the text that a locator names: (as the harness keeps it, masked, the scrub), or None
+                               (lines.doc_lines)
+    find:<harness>(root, query, k)  [(locator, score)]: the harness's own full-text search over the texts it keeps,
+                               for the store at root (index.Index.search); query: FTS5 prefixes ("stem"* OR ...),
+                               score as -bm25
+    vocab:<harness>(root, stems)  the harness's counts of those texts for the store at root: (rows, tokens, terms,
+                               count(stem) -> (rows, uses)), or None; stems(words) -> [(stem, i)] makes the stems
+                               of the index from the harness's words (index.Index: cue words, the zoom's tiers)
     config_layers(root)        the config files that the explorer of the store at root may show and change, each
                                {id, kind, label, path (a folder that holds config.json), parent (the id of the file
                                that it layers on, or None), applies (which chats read it), here (the file of this
@@ -138,6 +146,12 @@ def load():
 def get(name):
     load()
     return _given.get(name)
+
+
+def given(prefix):
+    """[(name, thing)] of every port whose name starts with prefix (one for each harness: "find:", "vocab:")."""
+    load()
+    return [(k, v) for k, v in sorted(_given.items()) if k.startswith(prefix) and v is not None]
 
 
 def need(name):

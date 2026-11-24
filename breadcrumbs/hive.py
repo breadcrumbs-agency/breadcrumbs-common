@@ -34,7 +34,7 @@ from . import ports
 from .crc32c import crc32c
 from .crumbs import Crumb, is_crumb
 from .index import NEIGHBOR
-from .lines import decode_spine, get_lines
+from .lines import decode_spine, doc_lines, get_lines
 from .reader import Reader
 from .store import format_id, parse_id
 from .zoom import Zoom, parse_ref
@@ -104,9 +104,10 @@ def collect(store, ref, shared, room=OPEN_BYTES):
                     walk(kid)
         elif data[:4] == b"SP01":
             if add(i, data):
-                for crc, ordinal in decode_spine(data)[a:b]:
+                spine = decode_spine(data)
+                for (crc, ordinal), text in zip(spine[a:b], doc_lines(store, i, data)[a:b]):
                     line = format_id(crc, ordinal)
-                    if line not in out and not add(line, store.get(line)):
+                    if line not in out and not add(line, text):
                         break
         else:
             add(i, data)

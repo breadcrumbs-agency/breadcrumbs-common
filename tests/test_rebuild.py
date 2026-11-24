@@ -110,6 +110,26 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(unmasked(store), ([doc], []))
         store.close()
 
+    def test_a_text_that_a_harness_keeps_keeps_its_spine_and_locator(self):
+        home = os.path.join(self.tmp.name, "located")
+        store, index = Store(os.path.join(home, "store")), Index(os.path.join(home, "index.db"))
+        turn = put_turn(store, index, "user", "a row that the harness keeps", "s1", loc="test:7")
+        doc = get_crumb(store, turn).ranges[0][0]
+        Refs(os.path.join(home, "refs")).set("sess-s1", turn)
+        index.close()
+        self.assertEqual(unmasked(store), ([], []))
+        store.close()
+        dest = os.path.join(self.tmp.name, "located2")
+        rebuild(home, dest)
+        new = Store(os.path.join(dest, "store"), readonly=True)
+        index = Index(os.path.join(dest, "index.db"), readonly=True)
+        try:
+            self.assertEqual(new.locator(doc), "test:7")
+            self.assertEqual(index.db.execute("SELECT loc FROM rows").fetchall(), [("test:7",)])
+        finally:
+            index.close()
+            new.close()
+
     def test_the_old_memory_is_not_changed(self):
         self.assertEqual(hashlib.sha256(read(self.src, "store", "blobs.pack")).hexdigest(), self.before)
 

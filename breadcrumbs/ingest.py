@@ -10,6 +10,7 @@ ports.harness, source).
 """
 
 import json
+import re
 import time
 
 from .crumbs import Crumb, get_crumb, put_crumb
@@ -26,23 +27,52 @@ def first_line(text):
     return ""
 
 
-def put_turn(store, index, role, text, session, ts=None, public=False, extra=None, kind="turn", prev=None):
-    """Store one message text as a turn crumb; index it when an index is given.
+_MORE = re.compile(r" \(\+\d+\)$")
+
+
+def title_of(store, crumb):
+    """The title that a view shows. The store keeps no words of a text that a harness keeps: the title of its crumb
+    (its role, or the first line that a release before copied) is not shown; the view shows the role and the first
+    line as the harness gives it now (masked). A span over such turns shows that title (+n), and a session whose
+    title came from its first turn shows it too."""
+    leaf, seen = crumb, 0
+    while leaf.kids and not leaf.ranges and seen < 8:
+        leaf, seen = get_crumb(store, leaf.kids[0]), seen + 1
+    role = leaf.meta.get("role")
+    loc = getattr(store, "locator", None)
+    if not (leaf.ranges and role and loc and loc(leaf.ranges[0][0])):
+        return crumb.title
+    doc, a, b = leaf.ranges[0][:3]
+    head = first_line(b"".join(get_lines(store, doc, a, min(b, a + 8))).decode("utf-8", "replace"))
+    shown = ("%s: %s" % (role, head))[:60]
+    if crumb is leaf:
+        return shown
+    more = _MORE.search(crumb.title)
+    if crumb.kind == "span" and more:
+        return shown[:48] + more.group(0)
+    if not crumb.title or crumb.title in (leaf.title, role):
+        return shown
+    return crumb.title
+
+
+def put_turn(store, index, role, text, session, ts=None, public=False, extra=None, kind="turn", prev=None, loc=None):
+    """Store one message text as a turn crumb; index it when an index is given. loc: where a harness keeps this exact
+    text (lines.put_text): the store then keeps no copy of it.
 
     prev: the crumb this turn follows in its dialogue (linked for neighbor smoothing). A link joins a turn to a
     turn of another role: a question and its answer. Two turns of one role in a row are not linked.
     """
     text = mask(text)  # the title, the lines and the index row all come from the masked text
     data = text.encode("utf-8")
-    doc = put_text(store, data)
+    doc = put_text(store, data, loc)
     n = len(split_lines(data))
     meta = {"role": role, "sess": session, "ts": int(time.time() if ts is None else ts)}
     if extra:
         meta.update(extra)
-    title = ("%s: %s" % (role, first_line(text)))[:60]
+    title = role if loc else ("%s: %s" % (role, first_line(text)))[:60]  # a harness's text: title(store, crumb)
     cid = put_crumb(store, Crumb(kind, title, ranges=[[doc, 0, n]], public=public, meta=meta))
     if index is not None:
-        index.add(cid, "%s:0-%d" % (doc, n), text, kind=kind, public=public)
+        index.add(cid, "%s:0-%d" % (doc, n), text, kind=kind, public=public, loc=loc)
         if prev and get_crumb(store, prev).meta.get("role") != role:
             index.link(prev, cid)
     return cid
@@ -192,12 +222,24 @@ def prune_index(store, index):
     return crumbs, rows
 
 
+def row_text(row):
+    """The text that put_rows stores of a row (see put_rows): a step's text and calls (step_text), a tool result as
+    plain(), a user or assistant text as it is; "" for a row that put_rows skips. A harness that keeps the row gives
+    these same bytes back for its locator (lines.put_text)."""
+    role, text, calls = row.get("role"), _text(row.get("content")), _calls(row.get("tool_calls"))
+    if role == "assistant" and calls:
+        return step_text(text, [(c["name"], c["arguments"]) for c in calls])
+    if role == "tool":
+        return plain(text)
+    return text if role in ("user", "assistant") else ""
+
+
 def put_rows(store, index, rows, session, prev=None, ts=None):
     """Store message rows in order. Returns (the new crumb ids, the last crumb of the neighbor chain):
     each indexed row is linked to the indexed row before it (prev at the start).
 
-    rows: dicts with role and content, and optional tool_calls, tool_call_id, tool_name (or name), ts, and
-      meta (more meta for a user or assistant turn, e.g. src and src_id of an import: see migrate.py).
+    rows: dicts with role and content, and optional tool_calls, tool_call_id, tool_name (or name), ts, loc (where the
+      harness keeps the text that this row becomes: see lines.put_text), and meta (more meta for a user or assistant turn, e.g. src and src_id of an import: see migrate.py).
       user or assistant text          -> a "turn" crumb
       an assistant row that calls tools -> a "step" crumb: step_text (its text, then call_text of each
                                          call); meta calls = the call ids, meta tools = the tool names
@@ -207,15 +249,13 @@ def put_rows(store, index, rows, session, prev=None, ts=None):
     result are stored but not indexed (a step is indexed when it also calls another tool)."""
     out, steps = [], {}
     for row in rows:
-        role, text, calls = row.get("role"), _text(row.get("content")), _calls(row.get("tool_calls"))
-        if role == "tool":
-            text = plain(text)
+        role, calls = row.get("role"), _calls(row.get("tool_calls"))
+        text = row_text(row)
         when = row.get("ts", ts)
         if role == "assistant" and calls:
-            text = step_text(text, [(c["name"], c["arguments"]) for c in calls])
             quiet = all(_memory_tool(c["name"]) for c in calls)
             cid = put_turn(store, None if quiet else index, "assistant", text, session, when, kind="step",
-                           prev=prev, extra={"calls": [c["id"] for c in calls], "tools": [c["name"] for c in calls]})
+                           prev=prev, loc=row.get("loc"), extra={"calls": [c["id"] for c in calls], "tools": [c["name"] for c in calls]})
             steps.update((c["id"], cid) for c in calls if c["id"])
         elif role == "tool" and text:
             name, call = row.get("tool_name") or row.get("name") or "", row.get("tool_call_id") or ""
@@ -224,10 +264,10 @@ def put_rows(store, index, rows, session, prev=None, ts=None):
                 extra["step"] = steps[call]
             quiet = _memory_tool(name)
             cid = put_turn(store, None if quiet else index, "tool:%s" % name if name else "tool", text, session,
-                           when, kind="tool", prev=prev, extra=extra or None)
+                           when, kind="tool", prev=prev, extra=extra or None, loc=row.get("loc"))
         elif role in ("user", "assistant") and text:
             quiet = False
-            cid = put_turn(store, index, role, text, session, when, prev=prev, extra=row.get("meta"))
+            cid = put_turn(store, index, role, text, session, when, prev=prev, extra=row.get("meta"), loc=row.get("loc"))
         else:
             continue
         out.append(cid)
@@ -275,7 +315,10 @@ def session(store, index, refs, sid, title, meta, rows, stats):
     turns, _ = put_rows(store, index, rows, sid)
     if not turns:
         return None
-    sess = put_tree(store, "sess", title or get_crumb(store, turns[0]).title, turns, meta=dict(meta or {}, sess=sid))
+    first = get_crumb(store, turns[0])
+    if not title and not (first.ranges and store.locator(first.ranges[0][0])):
+        title = first.title  # a harness's text gives the store no title: title_of reads it
+    sess = put_tree(store, "sess", title or "", turns, meta=dict(meta or {}, sess=sid))
     refs.set(_ref_name("sess-", sid), sess)
     stats["sessions"] += 1
     return sess

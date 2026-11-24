@@ -66,6 +66,8 @@ def unmasked(store):
     for blob_id in store.ids():
         blob = store.get(blob_id)
         if bytes(blob[:4]) == b"SP01":
+            if store.locator(blob_id):  # the harness keeps it, and masks it when it gives it: no line is here
+                continue
             text = b"".join(store.get(i) for i in line_ids(store, blob_id))
             if mask(text) != text:
                 docs.append(blob_id)
@@ -92,6 +94,10 @@ class _Rebuild:
     # -- texts ---------------------------------------------------------------------------------------------
     def new_doc(self, doc):
         got = self.doc.get(doc)
+        if got is None and self.src.locator(doc):  # a harness's text: its spine and locator, no line to mask
+            self.dst.put(self.src.get(doc))
+            self.dst.refer(doc, self.src.locator(doc))
+            got = self.doc[doc] = doc
         if got is None:
             old = [self.src.get(i) for i in line_ids(self.src, doc)]
             masked, pos, lines = mask(b"".join(old)), 0, []
@@ -152,11 +158,13 @@ class _Rebuild:
 
     def index(self, old, new):
         rows = 0
-        for crumb, ref, kind, public in old.execute("SELECT crumb, ref, kind, public FROM rows ORDER BY id"):
+        loc = "loc" if "loc" in [c[1] for c in old.execute("PRAGMA table_info(rows)")] else "NULL"
+        for crumb, ref, kind, public, at in old.execute("SELECT crumb, ref, kind, public, %s FROM rows ORDER BY id" % loc):
             if crumb not in self.crumb:
                 continue
             new_ref = self.fix(ref)
-            rows += new.add(self.crumb[crumb], new_ref, self.text_of(new_ref), kind=kind, public=bool(public))
+            text = "" if at else self.text_of(new_ref)  # a harness's text has its words in the harness's index
+            rows += new.add(self.crumb[crumb], new_ref, text, kind=kind, public=bool(public), loc=at)
         for table, sql, make in (
                 ("nbr", "SELECT a, b FROM nbr", lambda a, b: ("INSERT OR IGNORE INTO nbr VALUES (?, ?)", (self.fix(a), self.fix(b)))),
                 ("heat", "SELECT id, accessed, uses FROM heat",

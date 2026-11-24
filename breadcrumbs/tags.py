@@ -14,7 +14,7 @@ import sqlite3
 
 from .crumbs import Crumb, get_crumb, is_crumb, put_crumb
 from .history import commit, log
-from .lines import encode_spine, split_lines
+from .lines import doc_of, split_lines
 
 SUPERSEDED = "superseded"
 REF = "tags"
@@ -130,13 +130,7 @@ def replay(store, index, refs):
 def holders(store, index, text, kind=None):
     """The crumbs that hold exactly this text (one range of all its lines), oldest first. It writes nothing."""
     lines = split_lines(text.encode("utf-8"))
-    ids = []
-    for line in lines:
-        blob_id = store.find(line)
-        if blob_id is None:
-            return []
-        ids.append(blob_id)
-    doc = store.find(encode_spine(ids))
+    doc = doc_of(store, text.encode("utf-8"))
     if doc is None:
         return []
     sql, args = "SELECT crumb FROM rows WHERE ref = ?", ["%s:0-%d" % (doc, len(lines))]

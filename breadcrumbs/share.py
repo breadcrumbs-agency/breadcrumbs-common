@@ -21,7 +21,7 @@ import os
 
 from . import atomic
 from .crumbs import Crumb, get_crumb, put_crumb
-from .lines import decode_spine, put_text, split_lines
+from .lines import decode_spine, doc_lines, put_text, split_lines
 from .store import format_id
 
 RAW, DAG_JSON = 0x55, 0x0129
@@ -149,7 +149,7 @@ def read_car(path):
 
 # -- export / import ---------------------------------------------------------
 def _lines(store, doc):
-    return [store.get(format_id(c, o)) for c, o in decode_spine(store.get(doc))]
+    return doc_lines(store, doc)
 
 
 class _Exporter:
