@@ -21,6 +21,10 @@ Two processes can write one store (the Hermes gateway and the CLI). Each flush h
 exclusive lock on the file "lock" and first reads the index records that other writers
 appended. An id that names other bytes in another writer fails loudly. A torn record from a
 crashed writer is cut off. Without fcntl (Windows) use one writer per store.
+
+  sources     append-only lines "<doc id> <locator>\n": the texts whose bytes a harness keeps (lines.put_text with
+              a locator). Such a text has its spine here and no line blob; it is read from the harness. A later
+              line for the same doc wins. Written at flush, under the lock, after the block that holds the spine.
 """
 
 import contextlib
@@ -110,6 +114,8 @@ class Store:
         self._idx_size = 0  # bytes of blobs.idx read so far (whole records)
         self._clashes = []  # (row, block, off, length): another writer's record on one of our pending ids
         self._pack = self._idx = self._lockf = None
+        self._src_path = os.path.join(path, "sources")
+        self._src, self._src_size, self._src_pending = {}, 0, {}
         if not readonly:
             self._pack = open(os.path.join(path, "blobs.pack"), "ab")
             self._idx = open(self._idx_path, "ab")
@@ -362,8 +368,46 @@ class Store:
             if p not in self._dead:
                 yield format_id(self._crc[p], ordinals.get(p, 0))
 
+    def refer(self, doc, loc):
+        """Record that the text doc is kept by a harness at loc (lines.put_text): written at the next flush."""
+        if self.readonly:
+            raise PermissionError("read-only store: %s" % self.path)
+        if self._src.get(doc) != loc:
+            self._src[doc] = self._src_pending[doc] = loc
+
+    def locator(self, doc):
+        """Where a harness keeps the text doc, or None: then the text is in the store."""
+        if doc not in self._src:
+            self._src_catch_up()
+        return self._src.get(doc)
+
+    def located(self):
+        """{doc: locator} of every text that a harness keeps."""
+        self._src_catch_up()
+        return dict(self._src)
+
+    def _src_catch_up(self):
+        try:
+            size = os.path.getsize(self._src_path)
+        except OSError:
+            return
+        if size <= self._src_size:
+            return
+        with open(self._src_path, "rb") as f:
+            f.seek(self._src_size)
+            data = f.read(size - self._src_size)
+        end = data.rfind(b"\n") + 1  # a torn last line waits
+        self._src_size += end
+        for line in data[:end].decode("utf-8").splitlines():
+            doc, _, loc = line.partition(" ")
+            if doc not in self._src_pending:
+                self._src[doc] = loc
+
     def flush(self):
         if not self._buf:
+            if self._src_pending:
+                with self._locked():
+                    self._write_sources()
             return
         raw = bytes(self._buf)
         codec, comp = _compress(raw, self.codec)
@@ -384,8 +428,20 @@ class Store:
             self._idx.write(recs)
             self._idx.flush()
             self._idx_size = os.path.getsize(self._idx_path)
+            self._write_sources()
         self._buf.clear()
         self._pending.clear()
+
+    def _write_sources(self):
+        """Append the pending locators (the caller holds the lock; their spines are in written blocks)."""
+        if not self._src_pending:
+            return
+        self._src_catch_up()
+        with open(self._src_path, "ab") as f:
+            f.write("".join("%s %s\n" % kv for kv in self._src_pending.items()).encode("utf-8"))
+        self._src.update(self._src_pending)
+        self._src_pending.clear()
+        self._src_catch_up()
 
     def close(self):
         self.flush()

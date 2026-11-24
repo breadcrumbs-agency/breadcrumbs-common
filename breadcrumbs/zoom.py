@@ -31,7 +31,7 @@ import re
 
 from .crumbs import Crumb, is_crumb
 from .ingest import memory_row
-from .lines import decode_spine
+from .lines import doc_lines
 from .store import format_id
 
 HANDLE, GAP, DROP = "\u25b8", "\u22ef", "\u2026"
@@ -255,8 +255,7 @@ class Zoom:
     def _doc_lines(self, doc):
         lines = self._docs.get(doc)
         if lines is None:
-            ids = [format_id(c, o) for c, o in decode_spine(self.store.get(doc))]
-            lines = [self.store.get(i) for i in ids]
+            lines = doc_lines(self.store, doc)
             if any(b"\x00" in line for line in lines):  # binary (a SQLite file in a snap): never in a context
                 lines = [b"(binary, %d bytes: not shown)\n" % sum(len(line) for line in lines)]
             self._docs[doc] = lines

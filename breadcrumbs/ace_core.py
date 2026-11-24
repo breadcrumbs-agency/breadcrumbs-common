@@ -17,9 +17,10 @@ import time
 from . import dials, tags
 from .index import STOP
 from .ingest import call_text, plain, step_text
+from .crumbs import Crumb, put_crumb
 from .lines import put_text, split_lines
 from .store import Store
-from .zoom import GAP, HANDLE, Zoom
+from .zoom import GAP, HANDLE, Zoom, parse_ref  # noqa: F401  (GAP: breadcrumbs_hermes.ace re-exports it)
 
 
 LEVELS = (0.0, 0.05, 0.1, 0.25, 0.5, 1.0)
@@ -57,7 +58,7 @@ LAYER_NOTE = ("Earlier turns of this chat, condensed. Each %s line is a crumb at
               "(exact text); \u25c6 marks one that the new message needs. When one is too thin for the task, open "
               "it with crumb(ref, level): the next layer gives it more room and shrinks the crumbs around it.\n"
               % HANDLE)
-REF_RE = re.compile(r"^%s ([0-9a-f]{8}(?:\.\d+)?:\d+-\d+) " % HANDLE, re.M)
+REF_RE = re.compile(r"^%s ([0-9a-f]{8}(?:\.\d+)?(?::\d+-\d+)?) " % HANDLE, re.M)  # a text's lines, or a group's crumb
 WORD_RE = re.compile(r"[a-z][a-z0-9_]{2,}")
 ANCHOR_RE = re.compile(r"[\w./-]*\d[\w./-]*")
 LOG_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d pid=\d+ sess=(.*) act=\w+ in=\d+ out=\d+ last=\d+ "
@@ -163,10 +164,11 @@ def split(messages):
     return messages[:i], turns
 
 
-def ref_of(store, text):
-    """The crumb ref of a text: its document and its line range (the text is stored if it is new)."""
+def ref_of(store, text, loc=None):
+    """The crumb ref of a text: its document and its line range. loc: where the harness keeps these exact bytes
+    (lines.put_text: the store then keeps the spine and loc, no line); without one the text is stored."""
     data = text.encode("utf-8")
-    return "%s:0-%d" % (put_text(store, data), len(split_lines(data)))
+    return "%s:0-%d" % (put_text(store, data, loc), len(split_lines(data)))
 
 
 def _words(text):
@@ -884,10 +886,10 @@ class Engine:
             for m in turn:
                 if m.get("role") == "tool" and m.get("tool_call_id") in calls:
                     continue  # a view of a crumb: the crumb itself carries it, through its floor
-                text = crumb_text(m)
+                text, loc = self.place(m, crumb_text(m))
                 if not text.strip():
                     continue
-                ref = ref_of(self.store, text)
+                ref = ref_of(self.store, text, loc)
                 if ref in seen:
                     e = seen.pop(ref)  # the same text again: one crumb, at its newest place
                     e["count"] += 1
@@ -926,6 +928,11 @@ class Engine:
                 e.update(by=by[e["id"]], floor=0.0, hot=False)
         return entries
 
+    def place(self, m, text):
+        """(text, locator) of a message for its crumb: a harness that keeps the message gives its own text of it and
+        where it keeps it (lines.put_text), so the store holds no copy. Here: the text as it is, stored."""
+        return text, None
+
     def _render(self, entries, levels):
         out = [LAYER_HEAD, LAYER_NOTE]
         groups = collections.defaultdict(list)
@@ -936,10 +943,11 @@ class Engine:
             span = "turns %d-%d" % (es[0]["turn"] + 1, es[-1]["turn"] + 1)
             counts = collections.Counter(w for e in es for w in e["words"])
             cues = " ".join(sorted(counts, key=lambda w: (-counts[w], w))[:6])  # a tie goes by the word, not by chance
-            if levels[es[0]["id"]] is None:  # the whole group is one crumb: its messages, each under its ref
-                joined = "".join("%s %s %s\n%s\n" % (GAP, e["id"], e["role"], self.zoom.render(e["id"], 1.0)) for e in es)
-                out.append("%s %s group \u00b7%dt | %s | %s\n" % (HANDLE, ref_of(self.store, joined),
-                                                                  len(joined.encode("utf-8")) // 4, span, cues))
+            if levels[es[0]["id"]] is None:  # the whole group is one crumb over its messages' texts: no text of its own
+                ranges = [list(parse_ref(e["id"])) for e in es]
+                gid = put_crumb(self.store, Crumb("span", span, ranges=ranges, meta={"sess": self.session}))
+                out.append("%s %s group \u00b7%dt | %s | %s\n" % (HANDLE, gid, sum(e["size"] for e in es) // 4,
+                                                                  span, cues))
                 continue
             out.append("\u2500 %s | %s\n" % (span, cues))
             for e in es:

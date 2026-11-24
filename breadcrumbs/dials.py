@@ -108,9 +108,9 @@ DIALS = (
     Dial("overflow_high", 0.05, "float", 0.0, 1.0, "Controller", None,
          "The controller lowers the budget when more turns than this share overflow."),
     Dial("family", False, "bool", None, None, "Family (per profile)", None,
-         "After a delegation, the provider reads the child's session rows from state.db (read-only), writes them to "
-         "the child's own store (the folder children/ID of the breadcrumbs folder), and exports them there as a CAR "
-         "file. It then imports the CAR into the profile's own store as private crumbs. When the result of "
+         "After a delegation, the provider reads the child's session rows from state.db (read-only) and adds the "
+         "child's session to the profile's store as private crumbs that point at those rows (no text is copied). "
+         "When the result of "
          "delegate_task holds the entry of the child, it adds the handle of the child's session to that entry. Off: "
          "nothing is read, nothing is written and no result changes."),
     Dial("update_ms", 2000, "int", 200, 60000, "Viewer", "BREADCRUMBS_UPDATE_MS",
