@@ -14,6 +14,7 @@ memoryview cast to "I".
 import struct
 import sys
 
+from .mask import mask
 from .store import format_id, parse_id
 
 _HEAD = struct.Struct("<4sII")
@@ -90,7 +91,7 @@ def decode_spine(blob):
 
 def put_text(store, data):
     """Store a text; return its document id (the spine blob id)."""
-    ids = [store.put(line) for line in split_lines(data)]
+    ids = [store.put(line) for line in split_lines(mask(data))]
     return store.put(encode_spine(ids))
 
 

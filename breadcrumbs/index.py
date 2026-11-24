@@ -17,6 +17,8 @@ import sqlite3
 from collections import Counter
 from urllib.parse import quote
 
+from .mask import mask
+
 _TERM = re.compile(r"\w+", re.UNICODE)
 _CUE = re.compile(r"(?<![^\W_])[^\W\d_][^\W_]{2,}")  # a cue word: starts a token with a letter, 3+ characters
 _ESC = re.compile(r"\\[nrt]")  # an escaped newline or tab in logged text
@@ -283,7 +285,7 @@ class Index:
                                   (crumb, ref, kind, 1 if public else 0))
         except sqlite3.IntegrityError:
             return False
-        self.db.execute("INSERT INTO t (rowid, text) VALUES (?, ?)", (cur.lastrowid, text))
+        self.db.execute("INSERT INTO t (rowid, text) VALUES (?, ?)", (cur.lastrowid, mask(text)))
         return True
 
     def drop(self, crumb, text_of):
