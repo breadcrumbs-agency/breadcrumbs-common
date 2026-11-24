@@ -58,6 +58,24 @@ def _walk(x, f):
     return x
 
 
+def unmasked(store):
+    """The ids that hold a key shape that mask() would change, as a text or as a crumb: ([text ids], [crumb ids]). A
+    key can sit across two lines of a text, so each text is joined first; a crumb's title and meta are read too.
+    Only ids come back, never the text. blobs.pack is compressed, so a grep of the folder finds nothing."""
+    docs, crumbs = [], []
+    for blob_id in store.ids():
+        blob = store.get(blob_id)
+        if bytes(blob[:4]) == b"SP01":
+            text = b"".join(store.get(i) for i in line_ids(store, blob_id))
+            if mask(text) != text:
+                docs.append(blob_id)
+        elif is_crumb(blob):
+            c = get_crumb(store, blob_id)
+            if any(mask(x) != x for x in [c.title, *_strings(c.meta)]):
+                crumbs.append(blob_id)
+    return docs, crumbs
+
+
 class _Rebuild:
     def __init__(self, src, dst):
         self.src, self.dst = src, dst

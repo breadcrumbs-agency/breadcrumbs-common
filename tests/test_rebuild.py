@@ -9,9 +9,9 @@ from breadcrumbs.crumbs import Crumb, get_crumb, is_crumb, put_crumb
 from breadcrumbs.history import Refs, commit, log
 from breadcrumbs.index import Index
 from breadcrumbs.ingest import leaves, put_tree, put_turn
-from breadcrumbs.lines import get_text, split_lines
+from breadcrumbs.lines import get_text, line_ids, put_text, split_lines
 from breadcrumbs.mask import mask
-from breadcrumbs.rebuild import rebuild
+from breadcrumbs.rebuild import rebuild, unmasked
 from breadcrumbs.store import Store
 
 KEY = "sk-" + "proj-" + "Qm4Zr8TnV2xLc9HbYw3Ek7UaPd5Rs"  # joined here: no line of this file is a key a scanner stops
@@ -87,6 +87,28 @@ class RebuildTest(unittest.TestCase):
         self.assertTrue(hits(self.src, KEY[8:]))
         self.assertNotIn(BODY.encode(), blobs(self.dst))
         self.assertFalse(hits(self.dst, KEY[8:]))
+
+    def test_unmasked_names_the_texts_and_crumbs_that_hold_a_key_and_no_text(self):
+        src = Store(os.path.join(self.src, "store"), readonly=True)
+        try:
+            docs, crumbs = unmasked(src)
+            self.assertIn(self.old["doc"], docs)
+            self.assertIn(self.old["said"], crumbs)
+            self.assertIn(self.old["sess"], crumbs)  # the key is in its title
+            self.assertNotIn(self.old["answer"], crumbs)
+        finally:
+            src.close()
+        self.assertEqual(unmasked(self.store), ([], []))
+
+    def test_a_key_across_two_lines_is_found_and_masked(self):
+        home = os.path.join(self.tmp.name, "split")
+        store = Store(os.path.join(home, "store"))
+        with mock.patch("breadcrumbs.lines.mask", lambda x: x):
+            doc = put_text(store, b"x" * 240 + b"=" + KEY.encode() + b" tail\n")  # no space before byte 256: the cut falls inside the key
+        self.assertEqual(len(line_ids(store, doc)), 2)
+        self.assertTrue(all(mask(store.get(i)) == store.get(i) for i in line_ids(store, doc)))  # no line shows it alone
+        self.assertEqual(unmasked(store), ([doc], []))
+        store.close()
 
     def test_the_old_memory_is_not_changed(self):
         self.assertEqual(hashlib.sha256(read(self.src, "store", "blobs.pack")).hexdigest(), self.before)

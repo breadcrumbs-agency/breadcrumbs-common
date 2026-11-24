@@ -278,7 +278,8 @@ def main(argv=None):
     p.add_argument("--model", help="the model whose entries of config.json count")
     p.add_argument("--markdown", action="store_true", help="the tables of README \"Knobs and dials\"")
     add("stats")
-    add("verify")
+    p = add("verify"); p.add_argument("--secrets", action="store_true",
+                                       help="also list the texts and crumbs that hold a key shape (mask.py); the fix is rebuild")
     p = add("rebuild", help="write this memory again into DEST with every text masked (mask.py); this memory is not changed")
     p.add_argument("dest")
     p = add("summarize"); p.add_argument("refs", nargs="*"); p.add_argument("--all", action="store_true")
@@ -465,8 +466,13 @@ relate, suggest, seen, export, import")
                 except ValueError:
                     bad += 1
                 n += 1
-            print(json.dumps({"blobs": n, "bad": bad, "seconds": round(time.perf_counter() - t0, 3)}))
-            return 1 if bad else 0
+            out = {"blobs": n, "bad": bad, "seconds": round(time.perf_counter() - t0, 3)}
+            if args.secrets:
+                from .rebuild import unmasked
+                docs, crumbs = unmasked(store)
+                out["secrets"] = {"texts": docs, "crumbs": crumbs}
+            print(json.dumps(out))
+            return 1 if bad or (args.secrets and (docs or crumbs)) else 0
         elif args.cmd == "summarize":
             from . import summarize as sm
             from .history import commit
