@@ -51,10 +51,13 @@ class Refs:
         except FileNotFoundError:
             return None
 
-    def set(self, name, crumb_id):
+    def set(self, name, crumb_id, sync=True):
+        """Give the ref its new value in one step. sync: the value is on the device before the ref has it, so a power
+        loss leaves the old head or the new one. A bulk ingest sets thousands of session refs and passes False: a ref
+        that such a loss empties is read as "no session yet", and the next ingest writes it again."""
         if self.readonly:
             raise PermissionError("read-only refs: %s" % self.path)
-        atomic.write(self._file(name), (crumb_id + "\n").encode("ascii"))
+        atomic.write(self._file(name), (crumb_id + "\n").encode("ascii"), sync=sync)
 
     def names(self):
         return sorted(n for n in os.listdir(self.path) if _NAME.match(n) and not n.endswith(".tmp"))
@@ -76,7 +79,7 @@ class Later:
     def get(self, name):
         return self.waiting.get(name) or self.refs.get(name)
 
-    def set(self, name, crumb_id):
+    def set(self, name, crumb_id, sync=True):
         self.refs._file(name)  # a bad name fails now, as Refs.set does
         self.waiting[name] = crumb_id
 
@@ -90,7 +93,7 @@ class Later:
         """Write the refs that wait. Call it after store.flush()."""
         waiting, self.waiting = self.waiting, {}
         for name, crumb_id in waiting.items():
-            self.refs.set(name, crumb_id)
+            self.refs.set(name, crumb_id, sync=False)
 
 
 def commit(store, refs, name, roots, msg="", ts=None):
@@ -102,7 +105,7 @@ def commit(store, refs, name, roots, msg="", ts=None):
         crumb = Crumb("commit", msg[:60], kids=list(roots), heritage=[parent] if parent else [],
                       meta={"ts": int(time.time() if ts is None else ts), "msg": msg})
         cid = put_crumb(store, crumb)
-        store.flush()
+        getattr(store, "sync", store.flush)()  # on the device (store.py): a power loss leaves the old head or this one
         refs.set(name, cid)
     return cid
 
