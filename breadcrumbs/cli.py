@@ -279,6 +279,8 @@ def main(argv=None):
     p.add_argument("--markdown", action="store_true", help="the tables of README \"Knobs and dials\"")
     add("stats")
     add("verify")
+    p = add("rebuild", help="write this memory again into DEST with every text masked (mask.py); this memory is not changed")
+    p.add_argument("dest")
     p = add("summarize"); p.add_argument("refs", nargs="*"); p.add_argument("--all", action="store_true")
     p = add("publish"); p.add_argument("ref"); p.add_argument("--deep", action="store_true")
     p = add("share"); p.add_argument("refs", nargs="+"); p.add_argument("--out", required=True)
@@ -420,6 +422,15 @@ relate, suggest, seen, export, import")
             return 1
         finally:
             v.close()
+        return 0
+
+    if args.cmd == "rebuild":  # reads this memory and writes another folder: it opens no store of this home to write
+        from .rebuild import rebuild
+        try:
+            print(json.dumps(rebuild(home, args.dest)))
+        except (FileNotFoundError, FileExistsError) as e:
+            print("breadcrumbs: %s" % e, file=sys.stderr)
+            return 1
         return 0
 
     store, index, refs, zoom = open_all(home)
