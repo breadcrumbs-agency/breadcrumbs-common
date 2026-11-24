@@ -15,6 +15,7 @@ import time
 from .crumbs import Crumb, get_crumb, put_crumb
 from .history import Later, _ref_name, commit
 from .lines import get_lines, put_text, split_lines
+from .mask import mask
 from .runtime import no_gc
 
 
@@ -31,6 +32,7 @@ def put_turn(store, index, role, text, session, ts=None, public=False, extra=Non
     prev: the crumb this turn follows in its dialogue (linked for neighbor smoothing). A link joins a turn to a
     turn of another role: a question and its answer. Two turns of one role in a row are not linked.
     """
+    text = mask(text)  # the title, the lines and the index row all come from the masked text
     data = text.encode("utf-8")
     doc = put_text(store, data)
     n = len(split_lines(data))
